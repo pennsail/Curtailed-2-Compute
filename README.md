@@ -7,6 +7,11 @@ Leveraging Curtailed Renewable Energy for Datacenter Computing
 ## I. Data Sources 
 #### CAISO Curtailment Data Description
 - 5-minute interval data on renewable energy production and curtailment within California’s electricity grid
+- Only wind and solar resources can be reported in this manner because these resources have a
+forecast
+- Other renewables (like geothermal or biomass) are baseload and rarely curtailed.
+- Curtailment is defined as the difference between actual production and the forecast 
+when actual production is less than the forecast
 - Data files are available here:  
 [CAISO Curtailment Reports](https://www.caiso.com/informed/Pages/ManagingOversupply.aspx)
 
