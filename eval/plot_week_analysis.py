@@ -4,8 +4,8 @@ import pandas as pd
 
 # Load analysis results
 print("Loading analysis results...")
-week_vms = pd.read_csv("week_vms_analysis.csv")
-hourly_power = np.load("hourly_power.npy")
+week_vms = pd.read_csv("azure_vms_analysis.csv")
+hourly_power = np.load("azure_hourly_power.npy")
 
 # Convert to MW
 hourly_power_mw = hourly_power / 1e6
@@ -34,7 +34,7 @@ for day in range(8):
                 ha='center', fontsize=8)
 
 # 2. CPU utilization distribution
-ax2.hist(week_vms['avg_cpu'], bins=50, alpha=0.7, color='green')
+ax2.hist(week_vms['avg cpu'], bins=50, alpha=0.7, color='green')
 ax2.set_title('CPU Utilization Distribution')
 ax2.set_xlabel('CPU Utilization (%)')
 ax2.set_ylabel('Number of VMs')
@@ -51,20 +51,15 @@ ax3.set_xticks(range(len(top_vcpus)))
 ax3.set_xticklabels([f'{int(x)}' for x in top_vcpus.index])
 ax3.grid(True, alpha=0.3)
 
-# 4. Daily average power
-daily_power = []
-for day in range(7):
-    start_h = day * 24
-    end_h = (day + 1) * 24
-    daily_avg = hourly_power_mw[start_h:end_h].mean()
-    daily_power.append(daily_avg)
-
-days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-ax4.bar(days, daily_power, color='purple', alpha=0.7)
-ax4.set_title('Daily Average Power')
-ax4.set_xlabel('Day of Week')
-ax4.set_ylabel('Average Power (MW)')
+# 4. VM runtime duration histogram
+ax4.hist(week_vms['runtime_hours'], bins=50, alpha=0.7, color='red', edgecolor='black', linewidth=0.5)
+ax4.set_title('VM Runtime Duration Distribution')
+ax4.set_xlabel('Runtime (hours)')
+ax4.set_ylabel('Number of VMs')
 ax4.grid(True, alpha=0.3)
+# Add statistics text
+ax4.text(0.7, 0.8, f'Mean: {week_vms["runtime_hours"].mean():.1f}h\nMedian: {week_vms["runtime_hours"].median():.1f}h', 
+         transform=ax4.transAxes, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
 plt.tight_layout()
 plt.savefig('week_vm_analysis.png', dpi=150, bbox_inches='tight')
@@ -78,7 +73,10 @@ print(f"Peak power: {hourly_power_mw.max():.2f} MW")
 print(f"Minimum power: {hourly_power_mw.min():.2f} MW")
 print(f"Power variation range: {hourly_power_mw.max() - hourly_power_mw.min():.2f} MW")
 
-# Daily statistics
-print(f"\nDaily average power:")
-for i, day in enumerate(days):
-    print(f"  {day}: {daily_power[i]:.2f} MW")
+# VM runtime statistics
+print(f"\nVM Runtime Statistics:")
+print(f"  Mean runtime: {week_vms['runtime_hours'].mean():.1f} hours")
+print(f"  Median runtime: {week_vms['runtime_hours'].median():.1f} hours")
+print(f"  Max runtime: {week_vms['runtime_hours'].max():.1f} hours")
+print(f"  VMs running < 1h: {(week_vms['runtime_hours'] < 1).sum():,} ({(week_vms['runtime_hours'] < 1).mean()*100:.1f}%)")
+print(f"  VMs running full week: {(week_vms['runtime_hours'] >= 168).sum():,} ({(week_vms['runtime_hours'] >= 168).mean()*100:.1f}%)")

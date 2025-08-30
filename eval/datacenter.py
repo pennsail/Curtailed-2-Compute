@@ -12,6 +12,8 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 from battery import Battery  # Local import
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # ------------------------------
 # Strategy config (job-level)
@@ -33,9 +35,8 @@ class CarbonResponderConfig:
 # ------------------------------
 @dataclass
 class DataCenterConfig:
-    total_mw = 20.0
+    capacity_mw: float = 20.0                # IT capacity (MW)
     pue: float = 1.2                         # Power Usage Effectiveness
-    capacity_mw: float = total_mw / pue  # IT capacity (MW)
     watts_per_vcpu: float = 20.0             # W@100% util per vCPU (IT power model coeff)
     default_vcpu: int = 2                    # Fallback if bucket missing/invalid
     utilization_column: str = "avg_cpu"      # 'avg_cpu' or 'p95 max cpu'
@@ -70,9 +71,16 @@ class DataCenter:
 
     # ---------- CSV ingestion ----------
     def _parse_csv(self) -> Tuple[pd.DataFrame, str, str]:
-        df = pd.read_csv(self.csv_path)
+        # Handle vmtable.csv format with predefined headers
+        column_headers = [
+            'vm id', 'subscription id', 'deployment id', 'timestamp vm created', 'timestamp vm deleted',
+            'max cpu', 'avg cpu', 'p95 max cpu', 'vm category', 'vm virtual core count bucket', 'vm memory (gb) bucket'
+        ]
+        df = pd.read_csv(self.csv_path, header=None)
+        df.columns = column_headers
         df.columns = [c.strip().lower() for c in df.columns]
-        required = ["vm_id", "timestamp vm created", "timestamp vm deleted"]
+        
+        required = ["vm id", "timestamp vm created", "timestamp vm deleted"]
         for col in required:
             if col not in df.columns:
                 raise ValueError(f"Missing required column: {col}")
@@ -148,11 +156,29 @@ class DataCenter:
 
     # ---------- Build raw IT load from jobs (no scaling) ----------
     def _build_hourly_it_from_jobs_default(self, jobs: List[VMJob]) -> np.ndarray:
+        """Build hourly IT load from jobs using original timestamps"""
         H = self.config.week_hours
         it = np.zeros(H, dtype=float)
-        for j in jobs:
-            # default: run as originally overlapped
-            it[j.release_h : j.end_orig_h] += j.it_power_mw
+        
+        # Fully vectorized using numpy
+        if jobs:
+            # Extract job data as arrays
+            starts = np.array([max(0, j.release_h) for j in jobs])
+            ends = np.array([min(H, j.end_orig_h) for j in jobs])
+            powers = np.array([j.it_power_mw for j in jobs])
+            
+            # Create indices and values for all hours
+            indices = []
+            values = []
+            for i, (start, end, power) in enumerate(zip(starts, ends, powers)):
+                if end > start:
+                    indices.extend(range(start, end))
+                    values.extend([power] * (end - start))
+            
+            # Vectorized accumulation
+            if indices:
+                np.add.at(it, indices, values)
+        
         return it
 
     # ---------- Scaling ----------
@@ -193,59 +219,160 @@ class DataCenter:
             ) for _, row in sampled.iterrows()]
 
     # ---------- Job-level scheduling helpers ----------
-    def _schedule_only_curtail(self, jobs: List[VMJob], curtailed_facility_mw: np.ndarray) -> np.ndarray:
-        """Schedule jobs only during curtailment windows."""
+    def _get_day_boundaries(self, curtailed_facility_mw: np.ndarray, strategy: str) -> List[Tuple[int, int]]:
+        """Get day boundaries based on strategy"""
+        boundaries = []
+        curtail_length = []
+
+        if strategy == "curtail_only":
+            # Find all curtailment windows
+            prev_curtail_end = 0  # Start from week beginning
+            
+            for day in range(7):
+                day_start = day * 24
+                day_end = min(day_start + 24, len(curtailed_facility_mw))
+                
+                # Find curtailment in this day
+                curtail_found = False
+                for h in range(day_start, day_end):
+                    if h < len(curtailed_facility_mw) and float(curtailed_facility_mw[h]) > 0:
+                        # Find end of this curtailment
+                        curtail_start = h  # This is the start of curtailment
+                        curtail_end = h
+                        while (curtail_end < len(curtailed_facility_mw) and 
+                               curtail_end < len(curtailed_facility_mw) and
+                               float(curtailed_facility_mw[curtail_end]) > 0):
+                            curtail_end += 1
+                        
+                        # Boundary: from previous curtail end to current curtail end
+                        boundaries.append((prev_curtail_end, curtail_end))
+                        prev_curtail_end = curtail_end
+                        curtail_found = True
+                        curtail_length.append(curtail_end - curtail_start)
+                        break
+                
+                # If no curtailment found in this day, still create boundary to day end
+                if not curtail_found:
+                    # boundaries.append((prev_curtail_end, day_end))
+                    # prev_curtail_end = day_end
+                    raise ValueError("No curtailment found for day")
+        else:
+            raise ValueError(f"Unknown strategy: {strategy}")
+        return boundaries, curtail_length
+
+    def _schedule_day_jobs(self, args) -> Tuple[np.ndarray, int]:
+        """Schedule jobs for a single day"""
+        day_jobs, day_start, day_end, cap_it_by_curtail, strategy, day_price, curtail_length = args
+        
+        day_length = day_end - day_start
+        used = np.zeros(day_length, dtype=float)
+        scheduled_count = 0
+        use_battery = "_battery" in strategy
+        base_strategy = strategy.replace("curtail_battery", "curtail_only").replace("_battery", "")
+        
+        # Handle both as_is and curtail_only strategies
+        if base_strategy == "as_is":
+            # As-is scheduling within day boundaries
+            for job in day_jobs:
+                job_start = max(0, job.release_h - day_start)
+                job_end = min(day_length, job.end_orig_h - day_start)
+                if job_end > job_start:
+                    for h in range(job_start, job_end):
+                        used[h] += job.it_power_mw
+                    scheduled_count += 1
+            return used, scheduled_count
+
+        # first, for job length > curtailment window length we can drop them for now
+        day_jobs = [j for j in day_jobs if j.duration_h <= curtail_length]
+
+        # Simple approach: schedule jobs only when curtailment is available
+        for job in day_jobs:
+            job_rel_h = job.release_h - day_start
+            
+            # Try to schedule job starting from its release time or later
+            for start_h in range(max(0, job_rel_h), day_length - job.duration_h + 1):
+                abs_start = day_start + start_h
+                
+                # Check if all hours have curtailment capacity
+                can_schedule = True
+                for check_h in range(job.duration_h):
+                    abs_check_h = abs_start + check_h
+                    rel_check_h = start_h + check_h
+                    
+                    if rel_check_h >= day_length:
+                        can_schedule = False
+                        break
+                        
+                    curtail_cap = float(cap_it_by_curtail[abs_check_h]) if abs_check_h < len(cap_it_by_curtail) else 0.0
+                    
+                    # Must have curtailment capacity
+                    if curtail_cap <= 0 or (curtail_cap - used[rel_check_h]) < job.it_power_mw:
+                        can_schedule = False
+                        break
+                
+                if can_schedule:
+                    # Schedule the job
+                    for place_h in range(job.duration_h):
+                        used[start_h + place_h] += job.it_power_mw
+                    scheduled_count += 1
+                    break  # Job scheduled, move to next job
+    
+        return used, scheduled_count
+
+    def _schedule_parallel(self, jobs: List[VMJob], curtailed_facility_mw: np.ndarray, strategy: str, 
+                          price_vector: Optional[Sequence[float]] = None) -> np.ndarray:
+        """Parallel scheduling across days"""
         H = self.config.week_hours
         cap_it_by_curtail = curtailed_facility_mw / self.config.pue
         used = np.zeros(H, dtype=float)
         
-        # Find all curtailment windows
-        curtail_windows = []
-        h = 0
-        while h < H:
-            if cap_it_by_curtail[h] > 0:
-                start = h
-                while h < H and cap_it_by_curtail[h] > 0:
-                    h += 1
-                curtail_windows.append((start, h))
-            else:
-                h += 1
-        
-        # Sort jobs by release time, then by power
-        sorted_jobs = sorted(jobs, key=lambda j: (j.release_h, j.it_power_mw))
-        
-        # Try to schedule each job in curtailment windows
-        for job in sorted_jobs:
-            scheduled = False
+        # Get day boundaries
+        base_strategy = strategy.replace("curtail_battery", "curtail_only").replace("_battery", "")
+        boundaries, curtail_lengths = self._get_day_boundaries(curtailed_facility_mw, base_strategy)
+
+        # # sanity check: to debug the problem we make all jobs 1hr long
+        # for j in jobs:
+        #     j.duration_h = 1
+
+        # for curtailment only, jobs that length >= 20hr can be dropped now
+        jobs = [j for j in jobs if j.duration_h < 20]
+
+        # Prepare arguments for each day
+        day_args = []
+        for day, (day_start, day_end) in enumerate(boundaries):
+            # Get jobs for this day
+            if base_strategy == "as_is":
+                day_jobs = [j for j in jobs if day_start <= j.release_h < day_end]
+            else:  # curtail_only
+                day_jobs = [j for j in jobs if day_start <= j.release_h < day_end]
             
-            # Try each curtailment window
-            for window_start, window_end in curtail_windows:
-                window_length = window_end - window_start
-                
-                # Job must fit in window
-                if job.duration_h > window_length:
-                    continue
-                
-                # Try to place job at each position in window
-                for start_h in range(window_start, window_end - job.duration_h + 1):
-                    can_place = True
-                    
-                    # Check if enough capacity for entire duration
-                    for h in range(start_h, start_h + job.duration_h):
-                        if cap_it_by_curtail[h] - used[h] < job.it_power_mw:
-                            can_place = False
-                            break
-                    
-                    if can_place:
-                        # Place the job
-                        for h in range(start_h, start_h + job.duration_h):
-                            used[h] += job.it_power_mw
-                        scheduled = True
-                        break
-                
-                if scheduled:
-                    break
+            day_price = price_vector[day_start:day_end] if price_vector is not None else None
+            curtail_length = curtail_lengths[day] if day < len(curtail_lengths) else 0
+            day_args.append((day_jobs, day_start, day_end, cap_it_by_curtail, strategy, day_price, curtail_length))
         
+        # Parallel execution with progress bar
+        total_scheduled = 0
+        print(f"[INFO] Scheduling {len(day_args)} days in parallel...")
+        
+        with ThreadPoolExecutor(max_workers=7) as executor:
+            futures = [executor.submit(self._schedule_day_jobs, args) for args in day_args]
+            results = []
+            
+            for i, future in enumerate(futures):
+                result = future.result()
+                results.append(result)
+                progress = (i + 1) / len(futures) * 100
+                print(f"\r[PROGRESS] Day {i+1}/7 completed ({progress:.1f}%)", end="", flush=True)
+            
+        print()  # New line after progress bar
+        
+        # Combine results
+        for day, (day_used, day_scheduled) in enumerate(results):
+            day_start, day_end = boundaries[day]
+            used[day_start:day_start + len(day_used)] = day_used
+            total_scheduled += day_scheduled
+        
+        print(f"[DEBUG] {strategy}: scheduled {total_scheduled} jobs")
         return used
 
     def _schedule_carbon_responder(
@@ -269,6 +396,7 @@ class DataCenter:
     def demand_facility_mw(
         self,
         only_curtail: bool = False,
+        use_battery: bool = False,
         carbon_responder: bool = False,
         curtailed_supply_mw: Optional[Sequence[float]] = None,  # facility-level for only_curtail
         price_vector_per_mwh: Optional[Sequence[float]] = None, # for carbon_responder
@@ -289,20 +417,23 @@ class DataCenter:
             jobs = self._jobs
         H = self.config.week_hours
 
+        # Determine base strategy
         if carbon_responder:
             cfg = cr_cfg or CarbonResponderConfig()
             price = np.zeros(H) if price_vector_per_mwh is None else np.array(price_vector_per_mwh, dtype=float)
             carbon = np.zeros(H) if carbon_vector_kg_per_mwh is None else np.array(carbon_vector_kg_per_mwh, dtype=float)
             it = self._schedule_carbon_responder(jobs, price, carbon, cfg)
-
         elif only_curtail:
             if curtailed_supply_mw is None:
                 raise ValueError("curtailed_supply_mw must be provided for only_curtail strategy.")
-            it = self._schedule_only_curtail(jobs, np.array(curtailed_supply_mw, dtype=float))
-
+            strategy = "curtail_battery" if use_battery else "curtail_only"
+            it = self._schedule_parallel(jobs, np.array(curtailed_supply_mw, dtype=float), strategy, 
+                                       price_vector_per_mwh if use_battery else None)
+            print(f"[DEBUG] Curtail jobs input: {len(jobs)}, peak power: {max([j.it_power_mw for j in jobs]):.6f} MW")
         else:
-            # run-as-is (original timestamps)
+            # as-is strategy - simple accumulation
             it = self._build_hourly_it_from_jobs_default(jobs)
+            print(f"[DEBUG] As-is: scheduled {len(jobs)} jobs, peak power: {max([j.it_power_mw for j in jobs]):.6f} MW")
 
         return it * self.config.pue
 
@@ -355,31 +486,66 @@ class DataCenter:
             "emissions_kg": np.zeros(H),
         }
 
+        # Get price vector for arbitrage
+        if price_vector_per_mwh is not None:
+            prices = np.array(price_vector_per_mwh[:H])
+            avg_price = float(np.mean(prices))
+        else:
+            prices = np.full(H, grid_price_per_mwh)
+            avg_price = grid_price_per_mwh
+        
         for h in range(H):
             demand = demand_mw[h]
-            curtail = max(curtailed[h], 0.0)
+            curtail = max(float(curtailed[h]), 0.0)
             used_curtail = min(demand, curtail)
             log["met_by_curtail_mw"][h] = used_curtail
 
             deficit = max(demand - used_curtail, 0.0)
             surplus = max(curtail - used_curtail, 0.0)
+            current_price = float(prices[h]) if h < len(prices) else avg_price
 
             if self.battery is not None:
+                # Charge from surplus curtailment (free energy)
                 if surplus > 0:
                     charged_mwh = self.battery.charge(request_mw=surplus, hours=1.0)
                     log["battery_charge_mw"][h] = charged_mwh
                     log["cost_usd"][h] += charged_mwh * curtailed_price_per_mwh
                     log["emissions_kg"][h] += charged_mwh * curtailed_ci_kg_per_mwh
+                
+                # Battery arbitrage: charge when price low
+                elif float(current_price) < float(avg_price) * 0.7:
+                    charge_power = self.battery.max_charge_mw
+                    charged_mwh = self.battery.charge(request_mw=charge_power, hours=1.0)
+                    if charged_mwh > 0:
+                        log["battery_charge_mw"][h] = charged_mwh
+                        log["met_by_grid_mw"][h] += charged_mwh
+                        log["cost_usd"][h] += charged_mwh * current_price
+                        log["emissions_kg"][h] += charged_mwh * grid_ci_kg_per_mwh
+                
+                # Discharge battery to meet deficit
                 if deficit > 0:
                     discharged_mwh = self.battery.discharge(request_mw=deficit, hours=1.0)
                     log["battery_discharge_mw"][h] = discharged_mwh
                     deficit -= discharged_mwh
+                
+                # Discharge for arbitrage when price is high
+                elif float(current_price) > float(avg_price) * 1.3 and self.battery.soc_mwh > 0:
+                    discharge_power = min(self.battery.max_discharge_mw, self.battery.soc_mwh)
+                    discharged_mwh = self.battery.discharge(request_mw=discharge_power, hours=1.0)
+                    if discharged_mwh > 0:
+                        log["battery_discharge_mw"][h] = discharged_mwh
+                        log["met_by_grid_mw"][h] = max(0, demand - used_curtail - discharged_mwh)
+                        log["cost_usd"][h] -= discharged_mwh * (float(current_price) - float(avg_price))
+                
                 log["battery_soc_mwh"][h] = self.battery.soc_mwh
 
-            if deficit > 0:
-                log["met_by_grid_mw"][h] = deficit
-                log["cost_usd"][h] += deficit * grid_price_per_mwh
-                energy_emissions_kg = deficit * grid_ci_kg_per_mwh
+            # Calculate final grid consumption and emissions
+            final_grid_mw = max(0, demand - used_curtail - log["battery_discharge_mw"][h])
+            log["met_by_grid_mw"][h] = final_grid_mw
+            
+            if final_grid_mw > 0:
+                log["cost_usd"][h] += final_grid_mw * current_price
+                energy_emissions_kg = final_grid_mw * grid_ci_kg_per_mwh
                 log["emissions_kg"][h] += energy_emissions_kg
                 if carbon_price_per_ton > 0:
                     log["cost_usd"][h] += (energy_emissions_kg / 1000.0) * carbon_price_per_ton
