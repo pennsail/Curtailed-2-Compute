@@ -81,3 +81,15 @@ class Battery:
         soc_drop = energy_delivered_mwh / self._eta_d
         self.soc_mwh = max(self.soc_mwh - soc_drop, 0.0)
         return energy_delivered_mwh
+
+    # battery.py 末尾加上兩個方法（或放在 class 內任何位置都可）
+
+    def snapshot(self) -> float:
+        """Return a lightweight snapshot of state-of-charge (MWh)."""
+        return float(self.soc_mwh)
+
+    def restore(self, soc_mwh: float) -> None:
+        """Restore SoC from snapshot, clamped to [0, capacity]."""
+        soc = float(soc_mwh)
+        soc = max(0.0, min(self.capacity_mwh, soc))
+        self.soc_mwh = soc

@@ -33,11 +33,16 @@ for day in range(8):
         ax1.text(day*24 + 12, ax1.get_ylim()[1]*0.9, f'Day {day+1}', 
                 ha='center', fontsize=8)
 
-# 2. Runtime vs vCPU scatter plot
-ax2.scatter(week_vms['runtime_hours'], week_vms['vm virtual core count bucket'], alpha=0.5, s=10)
-ax2.set_title('VM Runtime vs vCPU Count')
+# 2. Runtime distribution by vCPU groups
+top_vcpu_groups = week_vms['vm virtual core count bucket'].value_counts().head(4).index
+colors = ['red', 'blue', 'green', 'orange']
+for i, vcpu in enumerate(top_vcpu_groups):
+    data = week_vms[week_vms['vm virtual core count bucket'] == vcpu]['runtime_hours']
+    ax2.hist(data, bins=30, alpha=0.6, label=f'{int(vcpu)} vCPUs', color=colors[i])
+ax2.set_title('Runtime Distribution by vCPU Count')
 ax2.set_xlabel('Runtime (hours)')
-ax2.set_ylabel('vCPU Count')
+ax2.set_ylabel('Number of VMs')
+ax2.legend()
 ax2.grid(True, alpha=0.3)
 
 # 3. vCPU distribution
