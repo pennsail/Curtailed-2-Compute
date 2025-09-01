@@ -19,16 +19,11 @@ import threading
 # Strategy config (job-level)
 # ------------------------------
 @dataclass
-class CarbonResponderConfig:
-    # Max postponement window (hours) per shiftable job from its original release time.
+class CarbonAwareConfig:
     max_shift_hours: int = 24
-    # weights is the weight for optimization, CarbonResponder optimizes the combination of
-    # job total waiting time and energy costs and carbon emissions.
-    weights: dict[str, float] = field(default_factory=lambda: {
-        "waiting_time": 1.0,
-        "energy_cost": 1.0,
-        "carbon_emissions": 1.0
-    })
+
+max_shift_hours: int = 24
+
 
 # ------------------------------
 # Core config
@@ -256,71 +251,119 @@ class DataCenter:
                     # boundaries.append((prev_curtail_end, day_end))
                     # prev_curtail_end = day_end
                     raise ValueError("No curtailment found for day")
+        elif strategy == "carbon_aware":
+            # Carbon-aware uses standard 24-hour boundaries
+            for day in range(7):
+                day_start = day * 24
+                day_end = min(day_start + 24, 168)
+                boundaries.append((day_start, day_end))
+                curtail_length.append(24)  # Full day available
         else:
             raise ValueError(f"Unknown strategy: {strategy}")
         return boundaries, curtail_length
 
     def _schedule_day_jobs(self, args) -> Tuple[np.ndarray, int]:
         """Schedule jobs for a single day"""
-        day_jobs, day_start, day_end, cap_it_by_curtail, strategy, day_price, curtail_length = args
+        day_jobs, day_start, day_end, cap_it_by_curtail, strategy, day_price, day_carbon, curtail_length = args
         
         day_length = day_end - day_start
         used = np.zeros(day_length, dtype=float)
         scheduled_count = 0
         use_battery = "_battery" in strategy
         base_strategy = strategy.replace("curtail_battery", "curtail_only").replace("_battery", "")
-        
-        # Handle both as_is and curtail_only strategies
-        if base_strategy == "as_is":
-            # As-is scheduling within day boundaries
+
+        # Handle both carbon_aware and curtail_only strategies
+        if base_strategy == "carbon_aware":
+            # Carbon aware scheduling within day boundaries
+            if day_carbon is None:
+                raise ValueError("No carbon data available for scheduling.")
+            # Load carbon intensity
+            carbon_intensity = np.array(day_carbon)
+            avg_carbon = float(np.mean(carbon_intensity))
+            
+            # Identify low and high carbon hours
+            low_carbon_hours = np.where(carbon_intensity < avg_carbon)[0]
+            high_carbon_hours = np.where(carbon_intensity >= avg_carbon)[0]
+            
+            # Schedule jobs originally in high carbon hours to low carbon hours
+            capacity_limit = self.config.capacity_mw
+            
             for job in day_jobs:
                 job_start = max(0, job.release_h - day_start)
                 job_end = min(day_length, job.end_orig_h - day_start)
-                if job_end > job_start:
-                    for h in range(job_start, job_end):
+                
+                # Check if job was originally in high carbon period
+                orig_hours = set(range(job_start, job_end))
+                in_high_carbon = any(h in high_carbon_hours for h in orig_hours)
+                
+                if in_high_carbon:
+                    # Try to shift to low carbon hours
+                    shifted = False
+                    max_shift = min(24, day_length - job.duration_h)
+                    
+                    for shift_start in low_carbon_hours:
+                        if shift_start + job.duration_h <= day_length:
+                            # Place job in low carbon period (no capacity constraint like as-is)
+                            for h in range(shift_start, shift_start + job.duration_h):
+                                used[h] += job.it_power_mw
+                            scheduled_count += 1
+                            shifted = True
+                            break
+                    
+                    if not shifted:
+                        # Fall back to original schedule (no capacity constraint like as-is)
+                        for h in range(job_start, min(job_end, day_length)):
+                            used[h] += job.it_power_mw
+                        scheduled_count += 1
+                else:
+                    # Job already in low carbon period, keep as-is (no capacity constraint)
+                    for h in range(job_start, min(job_end, day_length)):
                         used[h] += job.it_power_mw
                     scheduled_count += 1
+ 
             return used, scheduled_count
+        elif base_strategy == "curtail_only":
+            # first, for job length > curtailment window length we can drop them for now
+            day_jobs = [j for j in day_jobs if j.duration_h <= curtail_length]
 
-        # first, for job length > curtailment window length we can drop them for now
-        day_jobs = [j for j in day_jobs if j.duration_h <= curtail_length]
-
-        # Simple approach: schedule jobs only when curtailment is available
-        for job in day_jobs:
-            job_rel_h = job.release_h - day_start
-            
-            # Try to schedule job starting from its release time or later
-            for start_h in range(max(0, job_rel_h), day_length - job.duration_h + 1):
-                abs_start = day_start + start_h
+            # Simple approach: schedule jobs only when curtailment is available
+            for job in day_jobs:
+                job_rel_h = job.release_h - day_start
                 
-                # Check if all hours have curtailment capacity
-                can_schedule = True
-                for check_h in range(job.duration_h):
-                    abs_check_h = abs_start + check_h
-                    rel_check_h = start_h + check_h
+                # Try to schedule job starting from its release time or later
+                for start_h in range(max(0, job_rel_h), day_length - job.duration_h + 1):
+                    abs_start = day_start + start_h
                     
-                    if rel_check_h >= day_length:
-                        can_schedule = False
-                        break
+                    # Check if all hours have curtailment capacity
+                    can_schedule = True
+                    for check_h in range(job.duration_h):
+                        abs_check_h = abs_start + check_h
+                        rel_check_h = start_h + check_h
                         
-                    curtail_cap = float(cap_it_by_curtail[abs_check_h]) if abs_check_h < len(cap_it_by_curtail) else 0.0
+                        if rel_check_h >= day_length:
+                            can_schedule = False
+                            break
+                            
+                        curtail_cap = float(cap_it_by_curtail[abs_check_h]) if abs_check_h < len(cap_it_by_curtail) else 0.0
+                        
+                        # Must have curtailment capacity
+                        if curtail_cap <= 0 or (curtail_cap - used[rel_check_h]) < job.it_power_mw:
+                            can_schedule = False
+                            break
                     
-                    # Must have curtailment capacity
-                    if curtail_cap <= 0 or (curtail_cap - used[rel_check_h]) < job.it_power_mw:
-                        can_schedule = False
-                        break
-                
-                if can_schedule:
-                    # Schedule the job
-                    for place_h in range(job.duration_h):
-                        used[start_h + place_h] += job.it_power_mw
-                    scheduled_count += 1
-                    break  # Job scheduled, move to next job
-    
-        return used, scheduled_count
+                    if can_schedule:
+                        # Schedule the job
+                        for place_h in range(job.duration_h):
+                            used[start_h + place_h] += job.it_power_mw
+                        scheduled_count += 1
+                        break  # Job scheduled, move to next job
+            return used, scheduled_count
+        else:
+            raise NotImplementedError(f"Scheduling strategy '{base_strategy}' is not implemented.")
 
     def _schedule_parallel(self, jobs: List[VMJob], curtailed_facility_mw: np.ndarray, strategy: str, 
-                          price_vector: Optional[Sequence[float]] = None) -> np.ndarray:
+                          price_vector: Optional[Sequence[float]] = None, carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None
+    ) -> np.ndarray:
         """Parallel scheduling across days"""
         H = self.config.week_hours
         cap_it_by_curtail = curtailed_facility_mw / self.config.pue
@@ -330,25 +373,29 @@ class DataCenter:
         base_strategy = strategy.replace("curtail_battery", "curtail_only").replace("_battery", "")
         boundaries, curtail_lengths = self._get_day_boundaries(curtailed_facility_mw, base_strategy)
 
-        # # sanity check: to debug the problem we make all jobs 1hr long
+        # # sanity check: to debug the problem we make all jobs 5hr long
         # for j in jobs:
-        #     j.duration_h = 1
+        #     j.duration_h = 5
 
         # for curtailment only, jobs that length >= 20hr can be dropped now
-        jobs = [j for j in jobs if j.duration_h < 20]
+        if base_strategy == "curtail_only":
+            jobs = [j for j in jobs if j.duration_h < 20]
 
         # Prepare arguments for each day
         day_args = []
         for day, (day_start, day_end) in enumerate(boundaries):
-            # Get jobs for this day
-            if base_strategy == "as_is":
+            # Get jobs for this day - different logic for different strategies
+            if base_strategy == "carbon_aware":
+                # Carbon-aware: only jobs that start in this day (avoid double counting)
                 day_jobs = [j for j in jobs if day_start <= j.release_h < day_end]
-            else:  # curtail_only
+            else:
+                # Curtail-only: use existing logic
                 day_jobs = [j for j in jobs if day_start <= j.release_h < day_end]
             
             day_price = price_vector[day_start:day_end] if price_vector is not None else None
+            day_carbon = carbon_vector_kg_per_mwh[day_start:day_end] if carbon_vector_kg_per_mwh is not None else None
             curtail_length = curtail_lengths[day] if day < len(curtail_lengths) else 0
-            day_args.append((day_jobs, day_start, day_end, cap_it_by_curtail, strategy, day_price, curtail_length))
+            day_args.append((day_jobs, day_start, day_end, cap_it_by_curtail, strategy, day_price, day_carbon, curtail_length))
         
         # Parallel execution with progress bar
         total_scheduled = 0
@@ -375,22 +422,6 @@ class DataCenter:
         print(f"[DEBUG] {strategy}: scheduled {total_scheduled} jobs")
         return used
 
-    def _schedule_carbon_responder(
-        self,
-        jobs: List[VMJob],
-        price_per_mwh: np.ndarray,
-        carbon_kg_per_mwh: np.ndarray,
-        cfg: CarbonResponderConfig
-    ) -> np.ndarray:
-        """Postpone shiftable jobs within [release, release+max_shift] window to low-score hours.
-        - Non-preemptive, constant-power jobs.
-        - Capacity limit: IT capacity (config.capacity_mw).
-        """
-        # This part involves much more complex logic to find the best placement for each job
-        # within the allowed time window, considering both price, carbon, and wait times.
-        # We leave this part blank for now. No need to fill in the blank.
-
-        return
 
     # ---------- Public: build facility demand after strategy ----------
     def demand_facility_mw(
@@ -401,7 +432,6 @@ class DataCenter:
         curtailed_supply_mw: Optional[Sequence[float]] = None,  # facility-level for only_curtail
         price_vector_per_mwh: Optional[Sequence[float]] = None, # for carbon_responder
         carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,
-        cr_cfg: Optional[CarbonResponderConfig] = None,
     ) -> np.ndarray:
         """
         Returns facility demand (MW) after applying a job-level strategy.
@@ -419,16 +449,19 @@ class DataCenter:
 
         # Determine base strategy
         if carbon_responder:
-            cfg = cr_cfg or CarbonResponderConfig()
-            price = np.zeros(H) if price_vector_per_mwh is None else np.array(price_vector_per_mwh, dtype=float)
-            carbon = np.zeros(H) if carbon_vector_kg_per_mwh is None else np.array(carbon_vector_kg_per_mwh, dtype=float)
-            it = self._schedule_carbon_responder(jobs, price, carbon, cfg)
+            # Use carbon_aware strategy with _schedule_parallel framework
+            if carbon_vector_kg_per_mwh is None:
+                raise ValueError("carbon_vector_kg_per_mwh must be provided for carbon_responder strategy.")
+            strategy = "carbon_aware"
+            it = self._schedule_parallel(jobs, np.array(curtailed_supply_mw, dtype=float), strategy, 
+                                         price_vector_per_mwh, carbon_vector_kg_per_mwh)
+            print(f"[DEBUG] Carbon-aware jobs input: {len(jobs)}, peak power: {max([j.it_power_mw for j in jobs]):.6f} MW")
         elif only_curtail:
             if curtailed_supply_mw is None:
                 raise ValueError("curtailed_supply_mw must be provided for only_curtail strategy.")
             strategy = "curtail_battery" if use_battery else "curtail_only"
             it = self._schedule_parallel(jobs, np.array(curtailed_supply_mw, dtype=float), strategy, 
-                                       price_vector_per_mwh if use_battery else None)
+                                       price_vector_per_mwh, carbon_vector_kg_per_mwh)
             print(f"[DEBUG] Curtail jobs input: {len(jobs)}, peak power: {max([j.it_power_mw for j in jobs]):.6f} MW")
         else:
             # as-is strategy - simple accumulation
@@ -436,7 +469,7 @@ class DataCenter:
             print(f"[DEBUG] As-is: scheduled {len(jobs)} jobs, peak power: {max([j.it_power_mw for j in jobs]):.6f} MW")
 
         return it * self.config.pue
-
+    
     # ---------- Energy/cost/carbon simulation (unchanged, uses facility demand) ----------
     def simulate(
         self,
@@ -451,7 +484,6 @@ class DataCenter:
         carbon_responder: bool = False,
         price_vector_per_mwh: Optional[Sequence[float]] = None,
         carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,
-        cr_cfg: Optional[CarbonResponderConfig] = None,
     ) -> pd.DataFrame:
         """
         Simulate one week using job-level workload shaping first (if enabled), then hourly energy accounting.
@@ -463,7 +495,6 @@ class DataCenter:
             curtailed_supply_mw=curtailed_supply_mw,
             price_vector_per_mwh=price_vector_per_mwh,
             carbon_vector_kg_per_mwh=carbon_vector_kg_per_mwh,
-            cr_cfg=cr_cfg,
         )
 
         if curtailed_supply_mw is None:

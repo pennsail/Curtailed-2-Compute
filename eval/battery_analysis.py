@@ -6,19 +6,16 @@ from datetime import datetime
 
 def load_price_and_curtailment_data():
     """Load LMP and curtailment data"""
-    # Load price data
-    price_df = pd.read_csv("vector_high_volatility_week.csv")
-    price_vector = price_df['lmp_$/mwh'].values[:168]  # First week
-    
-    # Load curtailment data  
+    # Load curtailment data (which also has price)
     curtail_df = pd.read_csv("vector_high_curtailment_week.csv")
-    curtailed_supply = curtail_df['curtailed_mw'].values[:168]  # First week
+    price_vector = curtail_df['LMP_NP15'].values[:168]  # First week
+    curtailed_supply = curtail_df['Total_Curtailment_NP15_MW'].values[:168]  # First week
     
     return price_vector, curtailed_supply
 
 
 
-def analyze_strategy(strategy_name, dc, battery_capacity_mw, price_vector, curtailed_supply, carbon_vector, bess_params):
+def analyze_strategy(strategy_name, dc: DataCenter, battery_capacity_mw, price_vector, curtailed_supply, carbon_vector, bess_params):
     """Analyze a single strategy with given battery capacity"""
     
     BESS_DURATION_HOURS, BESS_COST_PER_KWH, BESS_FIRE_SUPPRESSION_COST_PER_KW = bess_params
@@ -45,15 +42,23 @@ def analyze_strategy(strategy_name, dc, battery_capacity_mw, price_vector, curta
             price_vector_per_mwh=price_vector
         )
     
-    # Simulate with the demand and battery using price vector for arbitrage
-    result = dc.simulate(
-        curtailed_supply_mw=curtailed_supply,
-        price_vector_per_mwh=price_vector,  # Pass price vector for arbitrage
-        grid_ci_kg_per_mwh=400.0,  # Grid carbon intensity
-        curtailed_ci_kg_per_mwh=0.0  # Clean curtailed energy
-    )
-    # Override with our calculated demand
-    result['demand_mw'] = demand_mw
+    # Calculate metrics directly from demand
+    total_energy_mwh = float(np.sum(demand_mw))
+    avg_price = float(np.mean(price_vector)) if len(price_vector) > 0 else 80.0
+    total_cost = total_energy_mwh * avg_price
+    total_carbon = total_energy_mwh * 400.0  # kg CO2/MWh
+    
+    # Create result structure
+    result = {
+        'demand_mw': demand_mw,
+        'attrs': {
+            'totals': {
+                'total_energy_mwh': total_energy_mwh,
+                'total_cost_usd': total_cost,
+                'total_emissions_kg': total_carbon
+            }
+        }
+    }
     
     # Calculate battery costs
     battery_capex = 0
@@ -63,10 +68,21 @@ def analyze_strategy(strategy_name, dc, battery_capacity_mw, price_vector, curta
         battery_capex = (battery_energy_kwh * BESS_COST_PER_KWH + 
                         battery_power_kw * BESS_FIRE_SUPPRESSION_COST_PER_KW)
     
-    # Calculate metrics
-    total_jobs_scheduled = np.sum(result['demand_mw'] > 0)  # Simplified job count
-    total_cost = result.attrs['totals']['total_cost_usd'] + battery_capex
-    total_carbon = result.attrs['totals']['total_emissions_kg']
+    # Calculate metrics - get actual job count
+    if dc._jobs is None:
+        dc._extract_jobs_from_vms()
+    all_jobs = dc._get_scaled_jobs() if dc.scale_jobs else dc._jobs
+    
+    if strategy_name == "as_is":
+        total_jobs_scheduled = len(all_jobs)
+    else:
+        # For curtail_only, estimate from energy ratio
+        as_is_energy = len(all_jobs) * np.mean([j.it_power_mw * j.duration_h for j in all_jobs])
+        curtail_energy = total_energy_mwh / dc.config.pue  # Convert back to IT energy
+        total_jobs_scheduled = max(1, int(len(all_jobs) * curtail_energy / as_is_energy)) if as_is_energy > 0 else 1
+    
+    total_cost = result['attrs']['totals']['total_cost_usd'] + battery_capex
+    total_carbon = result['attrs']['totals']['total_emissions_kg']
     
     cost_per_job = total_cost / max(total_jobs_scheduled, 1)
     carbon_per_job = total_carbon / max(total_jobs_scheduled, 1)
@@ -80,7 +96,7 @@ def analyze_strategy(strategy_name, dc, battery_capacity_mw, price_vector, curta
         'total_carbon_kg': total_carbon,
         'cost_per_job': cost_per_job,
         'carbon_per_job': carbon_per_job,
-        'total_energy_mwh': result.attrs['totals']['total_energy_mwh']
+        'total_energy_mwh': result['attrs']['totals']['total_energy_mwh']
     }
 
 def main():

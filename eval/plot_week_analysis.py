@@ -33,11 +33,11 @@ for day in range(8):
         ax1.text(day*24 + 12, ax1.get_ylim()[1]*0.9, f'Day {day+1}', 
                 ha='center', fontsize=8)
 
-# 2. CPU utilization distribution
-ax2.hist(week_vms['avg cpu'], bins=50, alpha=0.7, color='green')
-ax2.set_title('CPU Utilization Distribution')
-ax2.set_xlabel('CPU Utilization (%)')
-ax2.set_ylabel('Number of VMs')
+# 2. Runtime vs vCPU scatter plot
+ax2.scatter(week_vms['runtime_hours'], week_vms['vm virtual core count bucket'], alpha=0.5, s=10)
+ax2.set_title('VM Runtime vs vCPU Count')
+ax2.set_xlabel('Runtime (hours)')
+ax2.set_ylabel('vCPU Count')
 ax2.grid(True, alpha=0.3)
 
 # 3. vCPU distribution
