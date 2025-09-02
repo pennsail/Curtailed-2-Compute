@@ -67,11 +67,11 @@ class DataCenter:
         ]
         df = pd.read_csv(self.csv_path, header=None)
         if len(df.columns) != len(column_headers):
-            # best-effort: try without forcing header if shape differs
-            df = pd.read_csv(self.csv_path)
-            if len(df.columns) != len(column_headers):
-                # last resort: set names if fewer cols; user can adjust upstream
-                df.columns = (df.columns.tolist() + column_headers[len(df.columns):])[:len(column_headers)]
+            raise ValueError(f"Expected {len(column_headers)} columns, found {len(df.columns)}")
+            # df = pd.read_csv(self.csv_path)
+            # if len(df.columns) != len(column_headers):
+            #     # last resort: set names if fewer cols; user can adjust upstream
+            #     df.columns = (df.columns.tolist() + column_headers[len(df.columns):])[:len(column_headers)]
         else:
             df.columns = column_headers
 
@@ -107,13 +107,13 @@ class DataCenter:
         week_end_epoch = week_start_epoch + H * 3600.0
 
         # Clean rows
-        df = df.dropna(subset=[util_col, "timestamp vm created"])
-        # fill deleted with +1h minimum
-        df["timestamp vm deleted"] = df["timestamp vm deleted"].fillna(df["timestamp vm created"] + 3600.0)
-        # bounds
-        df = df[(df[util_col].between(0, 100))]
-        # vcpu bucket may be NaN; assume 2 if missing
-        df[vcpu_col] = df[vcpu_col].fillna(2).clip(lower=1)
+        # df = df.dropna(subset=[util_col, "timestamp vm created"])
+        # # fill deleted with +1h minimum
+        # df["timestamp vm deleted"] = df["timestamp vm deleted"].fillna(df["timestamp vm created"] + 3600.0)
+        # # bounds
+        # df = df[(df[util_col].between(0, 100))]
+        # # vcpu bucket may be NaN; assume 2 if missing
+        # df[vcpu_col] = df[vcpu_col].fillna(2).clip(lower=1)
 
         jobs: List[VMJob] = []
         watts_per_vcpu = float(self.config.watts_per_vcpu)
@@ -121,8 +121,8 @@ class DataCenter:
         for idx, row in df.iterrows():
             created = float(row["timestamp vm created"])
             deleted = float(row["timestamp vm deleted"])
-            if deleted <= created:
-                deleted = created + 3600.0
+            if deleted < created:
+                raise ValueError(f"Invalid timestamps for job {idx}: {created} -> {deleted}")
 
             # overlap with week window
             vm_s = max(created, week_start_epoch)
@@ -142,6 +142,10 @@ class DataCenter:
             it_power_mw = (watts_per_vcpu * vcpus * util_frac) / 1e6  # MW
             if it_power_mw <= 0.0:
                 continue
+
+            # # sanity check: skip jobs with duration > 12h
+            # if duration_h > 12:
+            #     continue
 
             jobs.append(VMJob(
                 release_h=s_idx,
@@ -536,3 +540,154 @@ class DataCenter:
 
         # Facility power = IT * PUE
         return it * float(self.config.pue), jobs_scheduled
+        
+    def simulate(
+        self,
+        *,
+        strategy: str = "as_is",                  # "as_is" | "only_curtail" | "carbon_aware"
+        use_battery: bool = False,                # 仅影响调度阶段的策略（如 only_curtail 时延长窗口）；核算阶段会基于 battery SoC 真实充放
+        curtailed_supply_mw: Optional[Sequence[float]] = None,  # 设施侧弃电功率向量，长度=week_hours
+        price_vector_per_mwh: Optional[Sequence[float]] = None, # 逐时电价（$/MWh），用于成本核算
+        carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,  # 逐时碳强度（kg CO2 / MWh），仅对“电网供能”生效
+        grid_price_per_mwh: float = 80.0,        # 兜底：若 price_vector 未提供或长度不够
+        curtailed_price_per_mwh: float = 0.0,    # 弃电成本（一般为 0）
+        carbon_price_per_ton: float = 0.0,       # 碳价（$/tCO2），可为 0
+        reset_battery_soc: bool = True           # 每次模拟是否将电池 SoC 清零（更可复现）；False 则延续上次状态
+    ) -> pd.DataFrame:
+        """
+        在给定策略下，先进行作业调度（得到逐时设施需求），再逐时做能量/成本/碳排的核算。
+        电池策略：只用「弃电盈余」充电；当有缺口时按功率/SoC 放电。剩余缺口由电网供给。
+        注意：这里不做电网套利充电，以确保碳排结果仅由调度与弃电/BESS作用决定。
+
+        返回：DataFrame（168 行），包含逐时分解及 .attrs["totals"] 汇总。
+        """
+        H = self.config.week_hours
+        # --------- 准备输入向量 ---------
+        if curtailed_supply_mw is None:
+            curtailed = np.zeros(H, dtype=float)
+        else:
+            curtailed = np.asarray(curtailed_supply_mw, dtype=float)
+            if curtailed.size != H:
+                raise ValueError("curtailed_supply_mw length must equal week_hours.")
+
+        if price_vector_per_mwh is not None:
+            prices = np.asarray(price_vector_per_mwh, dtype=float)
+            if prices.size < H:
+                raise ValueError("price_vector_per_mwh must have length >= week_hours.")
+        else:
+            prices = np.full(H, grid_price_per_mwh, dtype=float)
+
+        if carbon_vector_kg_per_mwh is not None:
+            grid_ci = np.asarray(carbon_vector_kg_per_mwh, dtype=float)
+            if grid_ci.size < H:
+                raise ValueError("carbon_vector_kg_per_mwh must have length >= week_hours.")
+        else:
+            # 如果没给，用一个保守的常数（不建议长期使用）
+            grid_ci = np.full(H, 400.0, dtype=float)
+
+        # --------- 先做作业调度 → 得到逐时设施需求 & 作业数 ---------
+        # 你的 demand_facility_mw 应该返回 (facility_mw_array, jobs_scheduled)
+        demand_mw, jobs_scheduled = self.demand_facility_mw(
+            strategy=strategy,
+            use_battery=use_battery,
+            curtailed_supply_mw=curtailed,
+            price_vector_per_mwh=prices,
+            carbon_vector_kg_per_mwh=grid_ci,
+        )
+
+        if demand_mw.size != H:
+            raise ValueError("demand_facility_mw must return an array of length week_hours.")
+
+        # --------- 初始化日志 ---------
+        log = {
+            "hour": np.arange(H),
+            "demand_mw": demand_mw.astype(float).copy(),
+            "met_by_curtail_mw": np.zeros(H, dtype=float),
+            "battery_charge_mw": np.zeros(H, dtype=float),     # 以「功率等效」记录（1h 步长 → MWh == MW）
+            "battery_discharge_mw": np.zeros(H, dtype=float),
+            "met_by_grid_mw": np.zeros(H, dtype=float),
+            "spilled_curtail_mw": np.zeros(H, dtype=float),
+            "battery_soc_mwh": np.zeros(H, dtype=float),
+            "cost_usd": np.zeros(H, dtype=float),
+            "emissions_kg": np.zeros(H, dtype=float),
+        }
+
+        # # --------- 电池初始状态 ---------
+        # if reset_battery_soc and self.battery is not None:
+        #     self.battery.reset_soc(0.0)
+
+        pue = float(self.config.pue)
+
+        # --------- 逐小时核算 ---------
+        for h in range(H):
+            demand = demand_mw[h]                 # 本小时设施侧需求（MW）
+            curtail_fac = max(curtailed[h], 0.0)  # 本小时设施侧可用弃电（MW）
+
+            # 1) 先用弃电直接满足需求
+            use_from_curtail = min(demand, curtail_fac)
+            log["met_by_curtail_mw"][h] = use_from_curtail
+
+            # 2) 计算盈余弃电，并用盈余为电池充电（若有）
+            surplus_curtail = max(curtail_fac - use_from_curtail, 0.0)  # 设施侧 MW
+            if self.battery is not None and surplus_curtail > 1e-12:
+                charged_mwh = self.battery.charge(request_mw=surplus_curtail, hours=1.0)  # 返回的是输入能量 MWh
+                log["battery_charge_mw"][h] = charged_mwh  # 1 小时步长 → 直接当成 MW 记录
+                # 弃电充电的能量计入弃电成本/碳（通常为 0）
+                log["cost_usd"][h] += charged_mwh * float(curtailed_price_per_mwh)
+                # 弃电视为 0 碳，若你有小于零的边际碳也可在此处传入
+                # 这里保持与 grid_ci 分离：弃电不乘 grid_ci
+            else:
+                # 没有电池或无法充，就把弃电溢出记为 spilled
+                log["spilled_curtail_mw"][h] = surplus_curtail
+
+            # 3) 若弃电不足，则依次用电池放电 → 电网补缺
+            remaining = demand - use_from_curtail
+            if remaining > 1e-12 and self.battery is not None:
+                discharged_mwh = self.battery.discharge(request_mw=remaining, hours=1.0)
+                log["battery_discharge_mw"][h] = discharged_mwh
+                remaining = max(remaining - discharged_mwh, 0.0)
+
+            # 4) 剩余缺口由电网供给，并据此计算成本/碳价（弃电供能不计电网碳）
+            if remaining > 1e-12:
+                log["met_by_grid_mw"][h] = remaining
+                price = float(prices[h])
+                ci = float(grid_ci[h])
+                # 直接成本
+                log["cost_usd"][h] += remaining * price
+                # 电网能量对应的碳
+                energy_emissions_kg = remaining * ci
+                log["emissions_kg"][h] += energy_emissions_kg
+                # 碳价（若有）
+                if carbon_price_per_ton > 0.0:
+                    log["cost_usd"][h] += (energy_emissions_kg / 1000.0) * float(carbon_price_per_ton)
+
+            # 5) 用弃电供给到负载（不是充电）的那部分计算弃电成本（通常为 0 碳/0 成本）
+            if use_from_curtail > 1e-12:
+                log["cost_usd"][h] += use_from_curtail * float(curtailed_price_per_mwh)
+                # 若你有非零弃电碳强度，可以在这里额外加上；当前假设 0。
+
+            # 记录 SoC
+            if self.battery is not None:
+                log["battery_soc_mwh"][h] = self.battery.soc_mwh
+            else:
+                log["battery_soc_mwh"][h] = 0.0
+
+        df = pd.DataFrame(log)
+
+        # --------- 汇总 ---------
+        totals = {
+            "jobs_scheduled": int(jobs_scheduled),
+            "total_energy_mwh": float(df["demand_mw"].sum()),
+            "it_energy_mwh": float(df["demand_mw"].sum() / pue),
+            "curtail_energy_to_load_mwh": float(df["met_by_curtail_mw"].sum()),
+            "battery_charge_mwh": float(df["battery_charge_mw"].sum()),
+            "battery_discharge_mwh": float(df["battery_discharge_mw"].sum()),
+            "grid_energy_mwh": float(df["met_by_grid_mw"].sum()),
+            "spilled_curtail_mwh": float(df["spilled_curtail_mw"].sum()),
+            "total_cost_usd": float(df["cost_usd"].sum()),
+            "total_emissions_kg": float(df["emissions_kg"].sum()),
+            "avg_power_mw": float(df["demand_mw"].mean()),
+            "peak_power_mw": float(df["demand_mw"].max()),
+        }
+        df.attrs["totals"] = totals
+        return df

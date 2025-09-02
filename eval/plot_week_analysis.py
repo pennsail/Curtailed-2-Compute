@@ -41,7 +41,8 @@ for i, vcpu in enumerate(top_vcpu_groups):
     ax2.hist(data, bins=30, alpha=0.6, label=f'{int(vcpu)} vCPUs', color=colors[i])
 ax2.set_title('Runtime Distribution by vCPU Count')
 ax2.set_xlabel('Runtime (hours)')
-ax2.set_ylabel('Number of VMs')
+ax2.set_ylabel('Number of VMs (log scale)')
+ax2.set_yscale('log')
 ax2.legend()
 ax2.grid(True, alpha=0.3)
 
@@ -51,19 +52,22 @@ top_vcpus = vcpu_counts.head(10)
 ax3.bar(range(len(top_vcpus)), top_vcpus.values, color='orange')
 ax3.set_title('vCPU Configuration Distribution (Top 10)')
 ax3.set_xlabel('Number of vCPUs')
-ax3.set_ylabel('Number of VMs')
+ax3.set_ylabel('Number of VMs (log scale)')
+ax3.set_yscale('log')
 ax3.set_xticks(range(len(top_vcpus)))
 ax3.set_xticklabels([f'{int(x)}' for x in top_vcpus.index])
 ax3.grid(True, alpha=0.3)
 
-# 4. VM runtime duration histogram
-ax4.hist(week_vms['runtime_hours'], bins=50, alpha=0.7, color='red', edgecolor='black', linewidth=0.5)
-ax4.set_title('VM Runtime Duration Distribution')
-ax4.set_xlabel('Runtime (hours)')
-ax4.set_ylabel('Number of VMs')
+# 4. vCPU hours histogram
+week_vms['vcpu_hours'] = week_vms['vm virtual core count bucket'] * week_vms['runtime_hours']
+ax4.hist(week_vms['vcpu_hours'], bins=50, alpha=0.7, color='purple', edgecolor='black', linewidth=0.5)
+ax4.set_title('vCPU Hours Distribution')
+ax4.set_xlabel('vCPU Hours')
+ax4.set_ylabel('Number of VMs (log scale)')
+ax4.set_yscale('log')
 ax4.grid(True, alpha=0.3)
 # Add statistics text
-ax4.text(0.7, 0.8, f'Mean: {week_vms["runtime_hours"].mean():.1f}h\nMedian: {week_vms["runtime_hours"].median():.1f}h', 
+ax4.text(0.7, 0.8, f'Mean: {week_vms["vcpu_hours"].mean():.1f}\nMedian: {week_vms["vcpu_hours"].median():.1f}', 
          transform=ax4.transAxes, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
 plt.tight_layout()

@@ -72,7 +72,7 @@ def main():
     # Scenario A: jobs as-is (after sampling to fit capacity)
     # -----------------------------
     print("Generating Scenario A (as-is, capacity-constrained)...")
-    demand_as_is_fac_mw = dc.demand_facility_mw(
+    demand_as_is_fac_mw, _ = dc.demand_facility_mw(
         strategy="as_is",
         use_battery=False
     )
@@ -81,7 +81,7 @@ def main():
     # Scenario B: curtailment-only scheduling (best-effort)
     # -----------------------------
     print("Generating Scenario B (curtailment-only)...")
-    demand_curtail_fac_mw = dc.demand_facility_mw(
+    demand_curtail_fac_mw, _ = dc.demand_facility_mw(
         strategy="only_curtail",
         use_battery=False,                  # 若想用電池延長視窗，改 True（需先在 build_site 時掛電池）
         curtailed_supply_mw=curtailed_supply
@@ -91,7 +91,7 @@ def main():
     # Scenario C: carbon-aware scheduling
     # -----------------------------
     print("Generating Scenario C (carbon-aware)...")
-    demand_carbon_fac_mw = dc.demand_facility_mw(
+    demand_carbon_fac_mw, _ = dc.demand_facility_mw(
         strategy="carbon_aware",
         use_battery=False,
         carbon_vector_kg_per_mwh=carbon_intensity_week
