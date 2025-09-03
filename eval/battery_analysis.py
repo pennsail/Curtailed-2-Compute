@@ -4,6 +4,8 @@ import pickle
 from datacenter import DataCenter, DataCenterConfig
 from battery import Battery
 from datetime import datetime
+from concurrent.futures import ProcessPoolExecutor
+import copy
 
 # ---- Strategy knobs for "only_curtail" (透傳到 datacenter) ----
 RESERVE_FRAC_FOR_BATT = 0.40   # 每個有棄電的小時預留 20% 功率給電池充電
@@ -87,73 +89,26 @@ def analyze_strategy(
 
     duration_h, cost_per_kwh, fire_cost_per_kw = bess_params
 
-    # 1) attach battery for SCHEDULING
+    # 1) attach battery and run simulate
     batt = attach_battery(dc, battery_capacity_mw, duration_h=duration_h, rte=0.92)
     use_battery = batt is not None
 
-    # 2) build schedule (returns facility MW and job count)
-    if strategy_name == "as_is":
-        demand_mw, jobs_scheduled = dc.demand_facility_mw(
-            strategy="as_is",
-            use_battery=False,  # Scheduling doesn't use battery (battery effects handled in simulate)
-            curtailed_supply_mw=curtailed_supply,
-            price_vector_per_mwh=price_vector,
-            carbon_vector_kg_per_mwh=carbon_vector,
-        )
-    elif strategy_name == "only_curtail":
-        demand_mw, jobs_scheduled = dc.demand_facility_mw(
-            strategy="only_curtail",
-            use_battery=use_battery,
-            curtailed_supply_mw=curtailed_supply,
-            price_vector_per_mwh=price_vector,
-            carbon_vector_kg_per_mwh=carbon_vector,
-        )
-    elif strategy_name == "carbon_aware":
-        demand_mw, jobs_scheduled = dc.demand_facility_mw(
-            strategy="carbon_aware",
-            use_battery=use_battery,  # Battery only affects subsequent energy accounting
-            curtailed_supply_mw=curtailed_supply,
-            price_vector_per_mwh=price_vector,
-            carbon_vector_kg_per_mwh=carbon_vector,
-        )
-    else:
-        raise ValueError(f"Unknown strategy: {strategy_name}")
-
-    if demand_mw.shape[0] != H:
-        raise ValueError("DataCenter returned wrong-length demand vector.")
-
-    # 3) re-attach a FRESH battery for ENERGY ACCOUNTING (avoid SOC changes from scheduling phase)
-    batt = attach_battery(dc, battery_capacity_mw, duration_h=duration_h, rte=0.92)
-    use_battery = batt is not None
-
-    # 4) run simulate to get grid-vs-curtail split and cost
-    only_curtail_flag = (strategy_name == "only_curtail")
-    carbon_responder_flag = (strategy_name == "carbon_aware")
-
-    # Note: We assume datacenter.simulate will pass the following kwargs to demand_facility_mw,
-    # to ensure simulate uses the same scheduling strategy and parameters as above.
+    # 2) run simulate to get scheduling + energy accounting
     df = dc.simulate(
         strategy=strategy_name,
         use_battery=use_battery,
         curtailed_supply_mw=curtailed_supply,
         price_vector_per_mwh=price_vector,
         carbon_vector_kg_per_mwh=carbon_vector,
-        # pass the two curtailment knobs through (only used by only_curtail)
         reserve_frac_for_batt=RESERVE_FRAC_FOR_BATT if strategy_name == "only_curtail" else None,
         carry_backlog=CARRY_BACKLOG if strategy_name == "only_curtail" else None,
-        # reset_battery_soc=True,
     )
 
-    # 5) totals: use uniform calculation for all strategies based on total demand and vectors
-    total_energy_mwh = float(df["demand_mw"].sum())
-    
-    assert len(price_vector) == len(carbon_vector) == len(demand_mw) == H
-
-    # Uniform cost calculation: total demand * price vector
-    total_cost_usd = float(np.dot(demand_mw, price_vector))
-    
-    # Uniform carbon calculation: total demand * carbon vector
-    total_carbon_kg = float(np.dot(demand_mw, carbon_vector))
+    # 3) get results from simulation
+    jobs_scheduled = df.attrs["totals"]["jobs_scheduled"]
+    total_energy_mwh = df.attrs["totals"]["total_energy_mwh"]
+    total_cost_usd = df.attrs["totals"]["total_cost_usd"]
+    total_carbon_kg = df.attrs["totals"]["total_emissions_kg"]
 
     # Apply job scaling factor to match datacenter upscaling
     if scale_jobs:
@@ -176,6 +131,24 @@ def analyze_strategy(
     }
 
 
+def run_analysis_task(task_args):
+    """Worker function for parallel processing"""
+    strategy, batt_mw, config, price_vector, curtailed_supply, carbon_vector, bess_params, job_scale_factor = task_args
+    
+    # Create fresh DataCenter instance for each task to avoid shared state issues
+    dc = DataCenter(csv_path="/z/azure/vmtable.csv", config=config, scale_jobs=scale_jobs)
+    
+    return analyze_strategy(
+        strategy_name=strategy,
+        dc=dc,
+        battery_capacity_mw=batt_mw,
+        price_vector=price_vector,
+        curtailed_supply=curtailed_supply,
+        carbon_vector=carbon_vector,
+        bess_params=bess_params,
+        job_scale_factor=job_scale_factor,
+    )
+
 def main():
     # 1) inputs
     price_vector, curtailed_supply = load_price_and_curtailment_data(H)
@@ -197,7 +170,7 @@ def main():
     bess_params = (BESS_DURATION_HOURS, BESS_COST_PER_KWH, BESS_FIRE_SUPPRESSION_COST_PER_KW)
 
     # 4) scenarios
-    battery_capacities = list(range(0, 21, 4))  # MW: [0, 4, 8, 12, 16, 20]
+    battery_capacities = list(range(0, 41, 4))  # MW: [0, 4, 8, 12, 16, 20]
     strategies = ["as_is", "only_curtail", "carbon_aware"]
     
     # Get scaling factor for job count adjustment
@@ -211,22 +184,24 @@ def main():
     job_scale_factor = target / peak_raw if peak_raw > 0 else 1.0
     print(f"Job scaling factor to fit {target} MW capacity: {job_scale_factor:.3f}")
 
-    results = []
+    # Create all combinations for parallel processing
+    tasks = []
+    for strategy in strategies:
+        for batt_mw in battery_capacities:
+            tasks.append((strategy, batt_mw, config, price_vector, curtailed_supply, carbon_vector, bess_params, job_scale_factor))
+    
+    print(f"\nRunning {len(tasks)} analysis tasks in parallel...")
+    
+    # Parallel execution
+    with ProcessPoolExecutor(max_workers=min(len(tasks), 40)) as executor:
+        results = list(executor.map(run_analysis_task, tasks))
+    
+    # Print results grouped by strategy
     for strategy in strategies:
         print(f"\n=== Strategy: {strategy} ===")
-        for batt_mw in battery_capacities:
-            res = analyze_strategy(
-                strategy_name=strategy,
-                dc=dc,
-                battery_capacity_mw=batt_mw,
-                price_vector=price_vector,
-                curtailed_supply=curtailed_supply,
-                carbon_vector=carbon_vector,
-                bess_params=bess_params,
-                job_scale_factor=job_scale_factor,
-            )
-            results.append(res)
-            print(f"  - Battery: {batt_mw} MW")
+        strategy_results = [r for r in results if r['strategy'] == strategy]
+        for res in sorted(strategy_results, key=lambda x: x['battery_capacity_mw']):
+            print(f"  - Battery: {res['battery_capacity_mw']} MW")
             print(f"    Jobs scheduled:     {res['total_jobs_scheduled']:>7}")
             print(f"    Total energy (MWh): {res['total_energy_mwh']:.1f}")
             print(f"    Total OpEx:         ${res['total_cost_usd']:.0f}")

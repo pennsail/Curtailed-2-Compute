@@ -75,7 +75,7 @@ def main():
     # Scenario A: jobs as-is (after sampling to fit capacity)
     # -----------------------------
     print("Generating Scenario A (as-is, capacity-constrained)...")
-    demand_as_is_fac_mw, _ = dc.demand_facility_mw(
+    demand_as_is_fac_mw, _, _ = dc.demand_facility_mw(
         strategy="as_is",
         use_battery=False
     )
@@ -84,7 +84,7 @@ def main():
     # Scenario B: curtailment-only scheduling (best-effort)
     # -----------------------------
     print("Generating Scenario B (curtailment-only)...")
-    demand_curtail_fac_mw, _ = dc.demand_facility_mw(
+    demand_curtail_fac_mw, _, _ = dc.demand_facility_mw(
         strategy="only_curtail",
         use_battery=False,                  # 若想用電池延長視窗，改 True（需先在 build_site 時掛電池）
         curtailed_supply_mw=curtailed_supply
@@ -94,7 +94,7 @@ def main():
     # Scenario C: carbon-aware scheduling
     # -----------------------------
     print("Generating Scenario C (carbon-aware)...")
-    demand_carbon_fac_mw, _ = dc.demand_facility_mw(
+    demand_carbon_fac_mw, _, _ = dc.demand_facility_mw(
         strategy="carbon_aware",
         use_battery=False,
         carbon_vector_kg_per_mwh=carbon_intensity_week
@@ -107,7 +107,7 @@ def main():
     print("Creating comparison plots...")
     hours = np.arange(H)
 
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10))
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 6))
 
     # Plot 1: original job-trace (unmodified)
     ax1.plot(hours, raw_demand_mw, linewidth=1.5, label='Original VM trace (facility equiv.)')
@@ -146,8 +146,8 @@ def main():
         ax2.axvline(d*24, color='gray', linestyle=':', alpha=0.35)
 
     plt.tight_layout()
-    plt.savefig(f'power_usage_comparison_{grid_case}.png', dpi=150, bbox_inches='tight')
-    print("Saved: power_usage_comparison.png")
+    plt.savefig(f'power_usage_comparison_{grid_case}.pdf', dpi=150, bbox_inches='tight')
+    print(f"Saved: power_usage_comparison_{grid_case}.pdf")
 
     # -----------------------------
     # Summary statistics

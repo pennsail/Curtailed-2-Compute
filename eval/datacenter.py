@@ -385,13 +385,11 @@ class DataCenter:
         curtailed_facility_mw: np.ndarray,
         use_battery: bool,
         *,
-        reserve_frac_for_batt: float = 0.0,   # No reservation - use only surplus curtailment
-        carry_backlog: bool = True,           # Carry jobs not scheduled from previous day to next day
-    ) -> Tuple[np.ndarray, int]:
+        reserve_frac_for_batt: float = 0.0,
+        carry_backlog: bool = True,
+    ) -> Tuple[np.ndarray, int, Dict[str, np.ndarray]]:
         """
-        Run jobs only when there is curtailment or "battery tail segment charged by curtailment".
-        Battery strategy: Use surplus curtailment (after meeting job demand) to charge battery,
-        then discharge at end of curtailment to extend job execution window.
+        Battery strategy: Start with full battery, use it to extend curtailment windows earlier.
         """
         H = self.config.week_hours
         if curtailed_facility_mw.size != H:
@@ -400,15 +398,21 @@ class DataCenter:
         pue = float(self.config.pue)
         it = np.zeros(H, dtype=float)
         have_batt = bool(use_battery and (self.battery is not None))
+        
+        # Start battery at full capacity
+        if have_batt:
+            self.battery.soc_mwh = self.battery.capacity_mwh
 
-        # First divide by day according to release_h; also prepare backlog
         jobs_by_day: list[list[VMJob]] = [[] for _ in range(7)]
         for j in jobs:
             day = min(max(j.release_h // 24, 0), 6)
             jobs_by_day[day].append(j)
         backlog: list[VMJob] = []
-
         scheduled_ids: set[int] = set()
+        
+        battery_charge_week = np.zeros(H, dtype=float)
+        battery_discharge_week = np.zeros(H, dtype=float)
+        battery_soc_week = np.zeros(H, dtype=float)
 
         for d in range(7):
             day_start = d * 24
@@ -418,73 +422,73 @@ class DataCenter:
                 continue
 
             curt_fac_day = np.array(curtailed_facility_mw[day_start:day_end], dtype=float)
-            # All curtailment available for jobs (no reservation)
-            cap_it_curtail = curt_fac_day / pue
+            
+            # Create extended capacity: curtailment + battery discharge at start of day
+            extended_cap_it = np.zeros(L, dtype=float)
+            
+            # Add curtailment capacity
+            extended_cap_it += curt_fac_day / pue
+            
+            # Add battery capacity throughout the day (not just beginning)
+            if have_batt:
+                # Distribute battery capacity across all hours of the day
+                daily_battery_energy = min(self.battery.soc_mwh, self.battery.max_discharge_mw * L)
+                if daily_battery_energy > 0:
+                    battery_power_per_hour = daily_battery_energy / L / pue  # IT MW per hour
+                    extended_cap_it += battery_power_per_hour
+            
             used_it = np.zeros(L, dtype=float)
-
-            # Jobs to schedule = backlog (cross-day) + today's released jobs
             day_jobs = (backlog if carry_backlog else []) + jobs_by_day[d]
             
-            # --- 1) First pack jobs into curtailment windows ---
+            # Schedule jobs with extended capacity
             self._pack_nonpreemptive_blocks(
                 jobs=day_jobs,
                 used_it=used_it,
-                cap_it=cap_it_curtail,
+                cap_it=extended_cap_it,
                 day_start_abs=day_start,
                 scheduled_ids=scheduled_ids,
             )
-
-            # --- 2) Use surplus curtailment to charge battery ---
+            
+            # Discharge battery for hours that used battery capacity
+            if have_batt:
+                for h in range(L):
+                    curtail_cap = curt_fac_day[h] / pue
+                    if used_it[h] > curtail_cap:
+                        battery_usage_it = used_it[h] - curtail_cap
+                        battery_usage_fac = battery_usage_it * pue
+                        if battery_usage_fac > 0:
+                            delivered = self.battery.discharge(request_mw=battery_usage_fac, hours=1.0)
+                            battery_discharge_week[day_start + h] = delivered
+            
+            # Charge battery with surplus curtailment
             if have_batt:
                 for h in range(L):
                     if curt_fac_day[h] > 1e-12:
-                        # Calculate surplus after job usage
                         used_fac = used_it[h] * pue
                         surplus_fac = max(curt_fac_day[h] - used_fac, 0.0)
                         if surplus_fac > 1e-12:
-                            self.battery.charge(request_mw=float(surplus_fac), hours=1.0)
-
-            # --- 3) Calculate tail segment (after last curtailment window ends) ---
-            tail_it_cap = np.zeros(L, dtype=float)
-            if have_batt:
-                windows = self._find_curtail_windows(curt_fac_day)
-                if windows:
-                    last_end_rel = windows[-1][1]
-                else:
-                    last_end_rel = 0  # If no curtailment today, treat tail as starting from 0
-                
-                # Discharge hourly until no power or end of day
-                for rel_h in range(last_end_rel, L):
-                    delivered = self.battery.discharge(
-                        request_mw=self.battery.max_discharge_mw, hours=1.0
-                    )
-                    if delivered <= 1e-12:
-                        break
-                    tail_it_cap[rel_h] = delivered / pue  # MWh@1h -> MW
-
-            # --- 4) Use "total IT capacity = curtailment IT + tail IT" to pack remaining jobs ---
-            total_cap_it = cap_it_curtail + tail_it_cap
-            remaining_jobs = [j for j in day_jobs if j.job_id not in scheduled_ids and j.duration_h <= L]
+                            charged = self.battery.charge(request_mw=surplus_fac, hours=1.0)
+                            battery_charge_week[day_start + h] = charged
             
-            # Pack remaining jobs using total capacity
-            self._pack_nonpreemptive_blocks(
-                jobs=remaining_jobs,
-                used_it=used_it,
-                cap_it=total_cap_it,
-                day_start_abs=day_start,
-                scheduled_ids=scheduled_ids,
-            )
-
-            # --- 5) Generate next day's backlog ---
+            # Record SOC
+            for h in range(L):
+                battery_soc_week[day_start + h] = self.battery.soc_mwh if have_batt else 0.0
+            
+            # Backlog
             if carry_backlog:
-                backlog = [j for j in day_jobs if j.job_id not in scheduled_ids and j.duration_h <= 24]
+                backlog = [j for j in day_jobs if j.job_id not in scheduled_ids]
             else:
                 backlog = []
-
-            # --- 6) Write back daily IT demand ---
+            
             it[day_start:day_end] = used_it
 
-        return it, len(scheduled_ids)
+        battery_usage = {
+            'charge_mw': battery_charge_week,
+            'discharge_mw': battery_discharge_week,
+            'soc_mwh': battery_soc_week
+        }
+        
+        return it, len(scheduled_ids), battery_usage
 
     # ---------- Public: build facility demand after strategy ----------
     def demand_facility_mw(
@@ -496,12 +500,17 @@ class DataCenter:
         carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,  # length 168
         reserve_frac_for_batt: Optional[float] = None,
         carry_backlog: Optional[bool] = None
-    ) -> Tuple[np.ndarray, int]:
+    ) -> Tuple[np.ndarray, int, Dict[str, np.ndarray]]:
         """
-        Returns (facility demand (MW), jobs_scheduled_count) after applying a job-level strategy.
+        Returns (facility demand (MW), jobs_scheduled_count, battery_usage_dict) after applying a job-level strategy.
         Battery does not affect scheduling for 'as_is' and 'carbon_aware'; it affects energy/carbon
         in subsequent accounting. For 'only_curtail', battery (if provided and use_battery=True)
         extends the within-day executable window by discharging after curtail hours.
+        
+        battery_usage_dict contains:
+        - 'charge_mw': hourly battery charging (MW)
+        - 'discharge_mw': hourly battery discharging (MW)
+        - 'soc_mwh': hourly battery state of charge (MWh)
         """
         # Prepare jobs (extraction + scaling)
         if self._jobs is None:
@@ -531,34 +540,44 @@ class DataCenter:
             curtailed = np.array(curtailed_supply_mw, dtype=float)
             if curtailed.size != H:
                 raise ValueError("curtailed_supply_mw must have length 168.")
-            it, jobs_scheduled = self._schedule_only_curtail(jobs, curtailed, use_battery=use_battery,
+            it, jobs_scheduled, battery_usage = self._schedule_only_curtail(jobs, curtailed, use_battery=use_battery,
                                                              carry_backlog=carry_backlog)
 
         # Facility power = IT * PUE
-        return it * float(self.config.pue), jobs_scheduled
+        facility_demand = it * float(self.config.pue)
+        
+        # Battery usage tracking (only meaningful for only_curtail strategy)
+        if strategy != "only_curtail":
+            battery_usage = {
+                'charge_mw': np.zeros(H, dtype=float),
+                'discharge_mw': np.zeros(H, dtype=float), 
+                'soc_mwh': np.zeros(H, dtype=float)
+            }
+        
+        return facility_demand, jobs_scheduled, battery_usage
         
     def simulate(
         self,
         *,
-        strategy: str = "as_is",                  # "as_is" | "only_curtail" | "carbon_aware"
-        use_battery: bool = False,                # Only affects scheduling phase strategy (e.g., extend window for only_curtail); accounting phase will charge/discharge based on actual battery SoC
-        curtailed_supply_mw: Optional[Sequence[float]] = None,  # Facility-side curtailment power vector, length=week_hours
-        price_vector_per_mwh: Optional[Sequence[float]] = None, # Hourly electricity price ($/MWh), used for cost accounting
-        carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,  # Hourly carbon intensity (kg CO2 / MWh), only applies to "grid power supply"
-        curtailed_price_per_mwh: float = 0.0,    # Curtailed electricity cost (usually 0)
-        carbon_price_per_ton: float = 0.0,       # Carbon price ($/tCO2), can be 0
+        strategy: str = "as_is",
+        use_battery: bool = False,
+        curtailed_supply_mw: Optional[Sequence[float]] = None,
+        price_vector_per_mwh: Optional[Sequence[float]] = None,
+        carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,
+        curtailed_price_per_mwh: float = 0.0,
+        carbon_price_per_ton: float = 0.0,
         reserve_frac_for_batt: Optional[float] = None,
         carry_backlog: Optional[bool] = None
     ) -> pd.DataFrame:
         """
-        Under given strategy, first perform job scheduling (get hourly facility demand), then do hourly energy/cost/carbon accounting.
-        Battery strategy: only charge with "curtailment surplus"; discharge by power/SoC when there's deficit. Remaining deficit supplied by grid.
-        Note: No grid arbitrage charging here to ensure carbon results are only determined by scheduling and curtailment/BESS effects.
-
-        Returns: DataFrame (168 rows), containing hourly breakdown and .attrs["totals"] summary.
+        Perform job scheduling and energy accounting.
+        Battery strategies:
+        - as_is/carbon_aware: Grid arbitrage (charge when cheap, discharge when expensive)
+        - only_curtail: Extend job execution window (charge from surplus curtailment, discharge to extend window)
         """
         H = self.config.week_hours
-        # --------- Prepare input vectors ---------
+        
+        # Prepare input vectors
         if curtailed_supply_mw is None:
             curtailed = np.zeros(H, dtype=float)
         else:
@@ -578,12 +597,10 @@ class DataCenter:
             if grid_ci.size < H:
                 raise ValueError("carbon_vector_kg_per_mwh must have length >= week_hours.")
         else:
-            # If not provided, use a conservative constant (not recommended for long-term use)
             grid_ci = np.full(H, 400.0, dtype=float)
 
-        # --------- First do job scheduling → get hourly facility demand & job count ---------
-        # Your demand_facility_mw should return (facility_mw_array, jobs_scheduled)
-        demand_mw, jobs_scheduled = self.demand_facility_mw(
+        # Get job scheduling demand and battery usage
+        demand_mw, jobs_scheduled, battery_usage = self.demand_facility_mw(
             strategy=strategy,
             use_battery=use_battery,
             curtailed_supply_mw=curtailed,
@@ -596,94 +613,82 @@ class DataCenter:
         if demand_mw.size != H:
             raise ValueError("demand_facility_mw must return an array of length week_hours.")
 
-        # --------- Initialize log ---------
+        # Battery operations based on strategy
+        if self.battery is not None and use_battery:
+            if strategy == "only_curtail":
+                # For only_curtail: use battery usage from scheduling phase
+                battery_charge_mw = battery_usage['charge_mw']
+                battery_discharge_mw = battery_usage['discharge_mw']
+                battery_soc_mwh = battery_usage['soc_mwh']
+            else:
+                # For as_is/carbon_aware: grid arbitrage (charge when cheap, discharge when expensive)
+                battery_charge_mw = np.zeros(H, dtype=float)
+                battery_discharge_mw = np.zeros(H, dtype=float)
+                battery_soc_mwh = np.zeros(H, dtype=float)
+                
+                # Simple strategy: charge when price < median, discharge when price > median
+                median_price = np.median(prices[:H])
+                for h in range(H):
+                    if prices[h] < median_price:
+                        # Charge up to 50% of demand or battery capacity
+                        charge_target = min(demand_mw[h] * 0.5, self.battery.max_charge_mw)
+                        charged = self.battery.charge(request_mw=charge_target, hours=1.0)
+                        battery_charge_mw[h] = charged
+                    elif prices[h] > median_price:
+                        # Discharge up to 50% of demand or available energy
+                        discharge_target = min(demand_mw[h] * 0.5, self.battery.max_discharge_mw)
+                        discharged = self.battery.discharge(request_mw=discharge_target, hours=1.0)
+                        battery_discharge_mw[h] = discharged
+                    battery_soc_mwh[h] = self.battery.soc_mwh
+        else:
+            # No battery
+            battery_charge_mw = np.zeros(H, dtype=float)
+            battery_discharge_mw = np.zeros(H, dtype=float)
+            battery_soc_mwh = np.zeros(H, dtype=float)
+
+        # Calculate net grid demand (demand - battery discharge + battery charge)
+        net_grid_demand_mw = demand_mw - battery_discharge_mw + battery_charge_mw
+        
+        # All energy comes from grid (curtailment has same price/carbon as grid)
+        met_by_grid_mw = net_grid_demand_mw.copy()
+        met_by_curtail_mw = np.zeros(H, dtype=float)  # Not used in cost calculation
+
+        # Calculate costs and emissions (all from grid, including curtailment)
+        total_cost_usd = float(np.dot(met_by_grid_mw, prices[:H]))
+        total_carbon_kg = float(np.dot(met_by_grid_mw, grid_ci[:H]))
+        
+        # Add carbon pricing if applicable
+        if carbon_price_per_ton > 0.0:
+            # total_cost_usd += (total_carbon_kg / 1000.0) * carbon_price_per_ton
+            raise NotImplementedError("Carbon pricing not implemented")
+
+        # Create result DataFrame
         log = {
             "hour": np.arange(H),
-            "demand_mw": demand_mw.astype(float).copy(),
-            "met_by_curtail_mw": np.zeros(H, dtype=float),
-            "battery_charge_mw": np.zeros(H, dtype=float),     # Record as "power equivalent" (1h step → MWh == MW)
-            "battery_discharge_mw": np.zeros(H, dtype=float),
-            "met_by_grid_mw": np.zeros(H, dtype=float),
-            "spilled_curtail_mw": np.zeros(H, dtype=float),
-            "battery_soc_mwh": np.zeros(H, dtype=float),
-            "cost_usd": np.zeros(H, dtype=float),
-            "emissions_kg": np.zeros(H, dtype=float),
+            "demand_mw": demand_mw.astype(float),
+            "battery_charge_mw": battery_charge_mw,
+            "battery_discharge_mw": battery_discharge_mw,
+            "battery_soc_mwh": battery_soc_mwh,
+            "met_by_curtail_mw": met_by_curtail_mw,
+            "met_by_grid_mw": met_by_grid_mw,
+            "cost_usd": met_by_grid_mw * prices[:H],
+            "emissions_kg": met_by_grid_mw * grid_ci[:H],
         }
-
-        # # --------- Battery initial state ---------
-        # if reset_battery_soc and self.battery is not None:
-        #     self.battery.reset_soc(0.0)
-
-        pue = float(self.config.pue)
-
-        # --------- Hourly accounting ---------
-        for h in range(H):
-            demand = demand_mw[h]                 # This hour's facility-side demand (MW)
-            curtail_fac = max(curtailed[h], 0.0)  # This hour's facility-side available curtailment (MW)
-
-            # 1) First use curtailment to directly meet demand
-            use_from_curtail = min(demand, curtail_fac)
-            log["met_by_curtail_mw"][h] = use_from_curtail
-
-            # 2) Calculate surplus curtailment and use surplus to charge battery (if any)
-            surplus_curtail = max(curtail_fac - use_from_curtail, 0.0)  # Facility-side MW
-            if self.battery is not None and surplus_curtail > 1e-12:
-                charged_mwh = self.battery.charge(request_mw=surplus_curtail, hours=1.0)  # Returns input energy MWh
-                log["battery_charge_mw"][h] = charged_mwh  # 1 hour step → record directly as MW
-                # Curtailed energy for charging counts as curtailed cost/carbon (usually 0)
-                log["cost_usd"][h] += charged_mwh * float(curtailed_price_per_mwh)
-                # Curtailed energy treated as 0 carbon, can pass negative marginal carbon here if needed
-                # Keep separate from grid_ci: curtailed energy doesn't multiply by grid_ci
-            else:
-                # No battery or can't charge, record curtailed overflow as spilled
-                log["spilled_curtail_mw"][h] = surplus_curtail
-
-            # 3) If curtailment insufficient, use battery discharge → grid makes up deficit
-            remaining = demand - use_from_curtail
-            if remaining > 1e-12 and self.battery is not None:
-                discharged_mwh = self.battery.discharge(request_mw=remaining, hours=1.0)
-                log["battery_discharge_mw"][h] = discharged_mwh
-                remaining = max(remaining - discharged_mwh, 0.0)
-
-            # 4) Remaining deficit supplied by grid, calculate cost/carbon price (curtailed energy doesn't count grid carbon)
-            if remaining > 1e-12:
-                log["met_by_grid_mw"][h] = remaining
-                price = float(prices[h])
-                ci = float(grid_ci[h])
-                # Direct cost
-                log["cost_usd"][h] += remaining * price
-                # Grid energy corresponding carbon
-                energy_emissions_kg = remaining * ci
-                log["emissions_kg"][h] += energy_emissions_kg
-                # Carbon price (if any)
-                if carbon_price_per_ton > 0.0:
-                    log["cost_usd"][h] += (energy_emissions_kg / 1000.0) * float(carbon_price_per_ton)
-
-            # 5) Curtailed energy supplied to load (not charging) calculates curtailed cost (usually 0 carbon/0 cost)
-            if use_from_curtail > 1e-12:
-                log["cost_usd"][h] += use_from_curtail * float(curtailed_price_per_mwh)
-                # If you have non-zero curtailed carbon intensity, can add here; currently assumes 0.
-
-            # Record SoC
-            if self.battery is not None:
-                log["battery_soc_mwh"][h] = self.battery.soc_mwh
-            else:
-                log["battery_soc_mwh"][h] = 0.0
-
+        
         df = pd.DataFrame(log)
-
-        # --------- Summary ---------
+        
+        # Summary totals
+        pue = float(self.config.pue)
         totals = {
             "jobs_scheduled": int(jobs_scheduled),
             "total_energy_mwh": float(df["demand_mw"].sum()),
             "it_energy_mwh": float(df["demand_mw"].sum() / pue),
-            "curtail_energy_to_load_mwh": float(df["met_by_curtail_mw"].sum()),
+            "curtail_energy_to_load_mwh": 0.0,  # Not tracked separately
             "battery_charge_mwh": float(df["battery_charge_mw"].sum()),
             "battery_discharge_mwh": float(df["battery_discharge_mw"].sum()),
             "grid_energy_mwh": float(df["met_by_grid_mw"].sum()),
-            "spilled_curtail_mwh": float(df["spilled_curtail_mw"].sum()),
-            "total_cost_usd": float(df["cost_usd"].sum()),
-            "total_emissions_kg": float(df["emissions_kg"].sum()),
+            "total_cost_usd": total_cost_usd,
+            "total_emissions_kg": total_carbon_kg,
             "avg_power_mw": float(df["demand_mw"].mean()),
             "peak_power_mw": float(df["demand_mw"].max()),
         }
