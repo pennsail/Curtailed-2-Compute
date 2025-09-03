@@ -15,8 +15,8 @@ def main():
     H = 7 * 24
     hourly_power_path = Path("hourly_power.npy")  # optional (原始 trace 的每小時功率，單位 W)
     vmtable_csv = "/z/azure/vmtable.csv"         # DataCenter 將用此 CSV 產生作業
-    curtail_csv = "vector_high_curtailment_week.csv"
-    caiso_ci_pkl = "caiso_carbon_intensity_2025.pkl"
+    grid_case = 'high_curtailment'
+    curtail_csv = f"vector_{grid_case}_week_v2.csv"
 
     datacenter_total_capacity_mw = 20.0  # Facility cap (e.g., nameplate)
     pue = 1.2
@@ -25,22 +25,25 @@ def main():
     # -----------------------------
     # Load vectors (curtail & carbon)
     # -----------------------------
-    print("Loading curtailed power week vector...")
+    print("Loading curtailed power and carbon intensity week vector...")
     curtail_df = pd.read_csv(curtail_csv)
-    curtailed_supply = curtail_df.iloc[:, 1].to_numpy() if "Total_Curtailment_NP15_MW" not in curtail_df.columns else \
-                       curtail_df["Total_Curtailment_NP15_MW"].to_numpy()
+    
+    # Load curtailment data
+    if "Total_Curtailment_NP15_MW" not in curtail_df.columns:
+        raise ValueError("Missing column 'Total_Curtailment_NP15_MW' in data file")
+    curtailed_supply = curtail_df["Total_Curtailment_NP15_MW"].to_numpy()
     if len(curtailed_supply) < H:
         raise ValueError(f"curtailment vector length={len(curtailed_supply)} < {H}.")
     curtailed_supply = curtailed_supply[:H].astype(float)
-
-    print("Loading carbon intensity week vector...")
-    with open(caiso_ci_pkl, "rb") as f:
-        ci = pickle.load(f)
-    # 假設你已存好每小時一個值的平均日曲線（24 長度），這裡重複 7 次
-    avg_ci_24h = np.array(ci["CAISO"]["2025"]["average"], dtype=float)
-    if avg_ci_24h.size not in (24, H):
-        raise ValueError("Expected carbon intensity vector of length 24 (one day) or 168 (one week).")
-    carbon_intensity_week = (np.tile(avg_ci_24h, 7) if avg_ci_24h.size == 24 else avg_ci_24h)[:H]
+    
+    # Load carbon intensity data (convert lbs to kg)
+    if "marginal_co2_lbs_per_mwh" not in curtail_df.columns:
+        raise ValueError("Missing column 'marginal_co2_lbs_per_mwh' in data file")
+    carbon_lbs = curtail_df["marginal_co2_lbs_per_mwh"].to_numpy()
+    if len(carbon_lbs) < H:
+        raise ValueError(f"carbon vector length={len(carbon_lbs)} < {H}.")
+    # Convert lbs to kg (1 lb = 0.453592 kg)
+    carbon_intensity_week = (carbon_lbs[:H] * 0.453592).astype(float)
 
     # -----------------------------
     # Optional: original hourly power (unmodified)
@@ -115,7 +118,7 @@ def main():
 
     # Carbon intensity as secondary axis
     ax1_r = ax1.twinx()
-    ax1_r.plot(hours, carbon_intensity_week, linestyle='--', alpha=0.7, label='Carbon intensity')
+    ax1_r.plot(hours, carbon_intensity_week, linestyle='--', alpha=0.9, label='Carbon intensity', color='orange')
     ax1_r.set_ylabel('Carbon Intensity (kg CO₂/MWh)')
     # Legends
     ln1, lb1 = ax1.get_legend_handles_labels()
@@ -143,7 +146,7 @@ def main():
         ax2.axvline(d*24, color='gray', linestyle=':', alpha=0.35)
 
     plt.tight_layout()
-    plt.savefig('power_usage_comparison.png', dpi=150, bbox_inches='tight')
+    plt.savefig(f'power_usage_comparison_{grid_case}.png', dpi=150, bbox_inches='tight')
     print("Saved: power_usage_comparison.png")
 
     # -----------------------------

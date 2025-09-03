@@ -225,6 +225,10 @@ class DataCenter:
 
         k = target / peak_raw
         # multiplicative scaling on power keeps shapes & counts
+        # save the scaled factor to a file, name it by strategy
+        # with open(f"scale_factor_{self.config.strategy}.txt", "w") as f:
+        #     f.write(f"{k}\n")
+
         return [
             VMJob(
                 release_h=j.release_h,
@@ -270,19 +274,19 @@ class DataCenter:
             if carbon.size != L:
                 carbon = np.full(L, np.mean(carbon) if carbon.size > 0 else 1.0)
 
-            # 長作業先排，降低碎片化
+            # Schedule longer jobs first to reduce fragmentation
             day_jobs_sorted = sorted(day_jobs, key=lambda j: j.duration_h, reverse=True)
 
             for j in day_jobs_sorted:
                 dur = j.duration_h
                 p = j.it_power_mw
-                # 以碳強度和為 key，從小到大試候選起點
-                # 候選為 0..L-dur
+                # Use carbon intensity sum as key, try candidate start points from low to high
+                # Candidates are 0..L-dur
                 if dur > L:
-                    # 無法在本日安放，退回原位跨日的版本早已被拆分，因此直接略過
+                    # Cannot place in this day, cross-day versions have been split, so skip directly
                     continue
 
-                # 列舉所有可行起點，先按碳和排序
+                # Enumerate all feasible start points, sort by carbon sum first
                 candidates: List[Tuple[float, int]] = []
                 for s_rel in range(0, L - dur + 1):
                     csum = float(np.sum(carbon[s_rel:s_rel + dur]))
@@ -290,7 +294,7 @@ class DataCenter:
                 candidates.sort(key=lambda x: x[0])
 
                 placed = False
-                # 先試低碳候選，檢查容量
+                # Try low-carbon candidates first, check capacity
                 for _, s_rel in candidates:
                     if self._fits_block(used, cap, s_rel, p, dur):
                         self._place_block(used, s_rel, p, dur)
@@ -299,7 +303,7 @@ class DataCenter:
                         break
 
                 if not placed:
-                    # 落回原始位置（相對當日），再從原位附近 ±4h 嘗試
+                    # Fall back to original position (relative to day), then try ±4h around original position
                     s0 = max(0, j.release_h)
                     s0 = min(s0, max(0, L - dur))
                     search = list(range(max(0, s0 - 4), min(L - dur, s0 + 4) + 1))
@@ -310,14 +314,14 @@ class DataCenter:
                             placed = True
                             break
                     if not placed:
-                        # 最後保底：左到右找第一個能放的
+                        # Last resort: find first placeable position from left to right
                         for s_rel in range(0, L - dur + 1):
                             if self._fits_block(used, cap, s_rel, p, dur):
                                 self._place_block(used, s_rel, p, dur)
                                 scheduled_ids.add(j.job_id)
                                 placed = True
                                 break
-                        # 若仍不行，代表本日總能量確實超容量，這在正常縮放後理論上少見
+                        # If still not possible, means daily total energy exceeds capacity, which should be rare after proper scaling
 
             it[day_start:day_end] = used
         return it, len(scheduled_ids)
@@ -325,7 +329,7 @@ class DataCenter:
     # ---------- Strategy: only_curtail (day-local packing; battery extends window) ----------
     # ---------- helpers for only_curtail ----------
     def _find_curtail_windows(self, fac_day: np.ndarray) -> list[tuple[int, int]]:
-        """回傳當日所有（facility）棄電>0 的連續窗口 [start,end)。"""
+        """Return all continuous windows [start,end) where (facility) curtailment > 0 for the day."""
         pos = fac_day > 1e-9
         L = len(fac_day)
         i = 0
@@ -350,12 +354,12 @@ class DataCenter:
         scheduled_ids: set[int],
     ) -> None:
         """
-        在 cap_it（當日 IT 容量上限向量）下，將 jobs（非搶占、定功率、連續 duration_h 小時）
-        自 job.release_h 起，找可行的連續時段塞入；成功者加到 scheduled_ids 並更新 used_it。
-        貪婪策略：先長後短、功率大的先試。
+        Under cap_it (daily IT capacity limit vector), pack jobs (non-preemptive, fixed power, continuous duration_h hours)
+        starting from job.release_h, find feasible continuous time slots; successful ones are added to scheduled_ids and update used_it.
+        Greedy strategy: longer first, then higher power first.
         """
         L = cap_it.size
-        # 長→短，功率大→小
+        # Long to short, high power to low power
         for j in sorted(jobs, key=lambda x: (x.duration_h, x.it_power_mw), reverse=True):
             if j.job_id in scheduled_ids:
                 continue
@@ -372,7 +376,7 @@ class DataCenter:
                     scheduled_ids.add(j.job_id)
                     placed = True
                     break
-            # 放不下就留待後面（或隔天 backlog）
+            # If can't fit, leave for later (or next day backlog)
 
     # ---------- Strategy: only_curtail (with battery extension & backlog) ----------
     def _schedule_only_curtail(
@@ -381,28 +385,23 @@ class DataCenter:
         curtailed_facility_mw: np.ndarray,
         use_battery: bool,
         *,
-        reserve_frac_for_batt: float = 0.20,  # 每個有棄電小時，預留 20% 功率給電池充電
-        carry_backlog: bool = True,           # 前一天沒排到的作業帶到隔天
+        reserve_frac_for_batt: float = 0.0,   # No reservation - use only surplus curtailment
+        carry_backlog: bool = True,           # Carry jobs not scheduled from previous day to next day
     ) -> Tuple[np.ndarray, int]:
         """
-        只在有棄電或「棄電充好的電池尾段」時運行作業。
-        核心差異：
-          1) 棄電小時先預留一部分功率（facility）用來充電，剩餘才拿來當下跑作業。
-          2) 充完後計算尾段能放的「等效 IT 容量向量」，把「剩餘作業」一次性打包進
-             [當日任何時段含尾段] 的總容量，避免雙峰。
-          3) 可選 backlog，將未排入的短作業帶到隔天。
+        Run jobs only when there is curtailment or "battery tail segment charged by curtailment".
+        Battery strategy: Use surplus curtailment (after meeting job demand) to charge battery,
+        then discharge at end of curtailment to extend job execution window.
         """
         H = self.config.week_hours
         if curtailed_facility_mw.size != H:
             raise ValueError("curtailed_supply_mw must have length equal to week_hours.")
-        if not (0.0 <= reserve_frac_for_batt < 1.0):
-            raise ValueError("reserve_frac_for_batt must be in [0,1).")
 
         pue = float(self.config.pue)
         it = np.zeros(H, dtype=float)
         have_batt = bool(use_battery and (self.battery is not None))
 
-        # 依 release_h 先分日；另外準備 backlog
+        # First divide by day according to release_h; also prepare backlog
         jobs_by_day: list[list[VMJob]] = [[] for _ in range(7)]
         for j in jobs:
             day = min(max(j.release_h // 24, 0), 6)
@@ -419,47 +418,42 @@ class DataCenter:
                 continue
 
             curt_fac_day = np.array(curtailed_facility_mw[day_start:day_end], dtype=float)
-
-            # --- 1) 為充電預留一部分 facility 棄電，剩餘才轉成 IT 可用 ---
-            reserve_fac = np.where(curt_fac_day > 0, curt_fac_day * reserve_frac_for_batt, 0.0)
-            run_fac = curt_fac_day - reserve_fac
-            # 當下可用的 IT 容量（只靠「不預留」那部分棄電）
-            cap_it_now = run_fac / pue
-
+            # All curtailment available for jobs (no reservation)
+            cap_it_curtail = curt_fac_day / pue
             used_it = np.zeros(L, dtype=float)
 
-            # 待排作業 = backlog（跨日） + 今天釋出的
+            # Jobs to schedule = backlog (cross-day) + today's released jobs
             day_jobs = (backlog if carry_backlog else []) + jobs_by_day[d]
-            # 先把「能落在有棄電的時段」的作業塞到 cap_it_now（整天都可放，但實際只有棄電小時 cap_it_now>0）
+            
+            # --- 1) First pack jobs into curtailment windows ---
             self._pack_nonpreemptive_blocks(
                 jobs=day_jobs,
                 used_it=used_it,
-                cap_it=cap_it_now,
+                cap_it=cap_it_curtail,
                 day_start_abs=day_start,
                 scheduled_ids=scheduled_ids,
             )
 
-            # --- 2) 用預留的 reserve_fac 逐小時為電池充電（facility）---
+            # --- 2) Use surplus curtailment to charge battery ---
             if have_batt:
                 for h in range(L):
-                    if reserve_fac[h] > 1e-12:
-                        self.battery.charge(request_mw=float(reserve_fac[h]), hours=1.0)
+                    if curt_fac_day[h] > 1e-12:
+                        # Calculate surplus after job usage
+                        used_fac = used_it[h] * pue
+                        surplus_fac = max(curt_fac_day[h] - used_fac, 0.0)
+                        if surplus_fac > 1e-12:
+                            self.battery.charge(request_mw=float(surplus_fac), hours=1.0)
 
-            # Update backlog for next day
-            if carry_backlog:
-                backlog = [j for j in day_jobs if j.job_id not in scheduled_ids and j.duration_h <= 24]
-
-            it[day_start:day_end] = used_it
-
-            #  --- 3) 計算尾段（從最後一個棄電窗結束後），把電池能量化為「IT 尾段容量」 ---
+            # --- 3) Calculate tail segment (after last curtailment window ends) ---
             tail_it_cap = np.zeros(L, dtype=float)
             if have_batt:
                 windows = self._find_curtail_windows(curt_fac_day)
                 if windows:
                     last_end_rel = windows[-1][1]
                 else:
-                    last_end_rel = 0  # 當日無棄電則把尾段視為從 0 開始（全靠電池）
-                # 逐小時放電，直到沒電或到當日結束
+                    last_end_rel = 0  # If no curtailment today, treat tail as starting from 0
+                
+                # Discharge hourly until no power or end of day
                 for rel_h in range(last_end_rel, L):
                     delivered = self.battery.discharge(
                         request_mw=self.battery.max_discharge_mw, hours=1.0
@@ -468,11 +462,11 @@ class DataCenter:
                         break
                     tail_it_cap[rel_h] = delivered / pue  # MWh@1h -> MW
 
-            # --- 4) 用「總 IT 容量 = 當下棄電 IT + 尾段 IT」再嘗試把『尚未排入』的作業塞進去 ---
-            total_cap_it = cap_it_now + tail_it_cap
-            # 只挑還沒排到的作業，且 duration 不超過當日剩餘小時數（簡單保守）
+            # --- 4) Use "total IT capacity = curtailment IT + tail IT" to pack remaining jobs ---
+            total_cap_it = cap_it_curtail + tail_it_cap
             remaining_jobs = [j for j in day_jobs if j.job_id not in scheduled_ids and j.duration_h <= L]
-            # 再 pack 一次（一次性對整天），避免雙峰
+            
+            # Pack remaining jobs using total capacity
             self._pack_nonpreemptive_blocks(
                 jobs=remaining_jobs,
                 used_it=used_it,
@@ -481,14 +475,13 @@ class DataCenter:
                 scheduled_ids=scheduled_ids,
             )
 
-            # --- 5) 產生下一天的 backlog（可選） ---
+            # --- 5) Generate next day's backlog ---
             if carry_backlog:
-                # 把還沒排到、而且「可能在明天還有機會（duration ≤ 24）」的留下
                 backlog = [j for j in day_jobs if j.job_id not in scheduled_ids and j.duration_h <= 24]
             else:
                 backlog = []
 
-            # --- 6) 回寫當日 IT 需求 ---
+            # --- 6) Write back daily IT demand ---
             it[day_start:day_end] = used_it
 
         return it, len(scheduled_ids)
@@ -501,6 +494,8 @@ class DataCenter:
         curtailed_supply_mw: Optional[Sequence[float]] = None,   # length 168 (facility MW)
         price_vector_per_mwh: Optional[Sequence[float]] = None,  # (unused here; reserved)
         carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,  # length 168
+        reserve_frac_for_batt: Optional[float] = None,
+        carry_backlog: Optional[bool] = None
     ) -> Tuple[np.ndarray, int]:
         """
         Returns (facility demand (MW), jobs_scheduled_count) after applying a job-level strategy.
@@ -536,7 +531,8 @@ class DataCenter:
             curtailed = np.array(curtailed_supply_mw, dtype=float)
             if curtailed.size != H:
                 raise ValueError("curtailed_supply_mw must have length 168.")
-            it, jobs_scheduled = self._schedule_only_curtail(jobs, curtailed, use_battery=use_battery)
+            it, jobs_scheduled = self._schedule_only_curtail(jobs, curtailed, use_battery=use_battery,
+                                                             carry_backlog=carry_backlog)
 
         # Facility power = IT * PUE
         return it * float(self.config.pue), jobs_scheduled
@@ -545,24 +541,24 @@ class DataCenter:
         self,
         *,
         strategy: str = "as_is",                  # "as_is" | "only_curtail" | "carbon_aware"
-        use_battery: bool = False,                # 仅影响调度阶段的策略（如 only_curtail 时延长窗口）；核算阶段会基于 battery SoC 真实充放
-        curtailed_supply_mw: Optional[Sequence[float]] = None,  # 设施侧弃电功率向量，长度=week_hours
-        price_vector_per_mwh: Optional[Sequence[float]] = None, # 逐时电价（$/MWh），用于成本核算
-        carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,  # 逐时碳强度（kg CO2 / MWh），仅对“电网供能”生效
-        grid_price_per_mwh: float = 80.0,        # 兜底：若 price_vector 未提供或长度不够
-        curtailed_price_per_mwh: float = 0.0,    # 弃电成本（一般为 0）
-        carbon_price_per_ton: float = 0.0,       # 碳价（$/tCO2），可为 0
-        reset_battery_soc: bool = True           # 每次模拟是否将电池 SoC 清零（更可复现）；False 则延续上次状态
+        use_battery: bool = False,                # Only affects scheduling phase strategy (e.g., extend window for only_curtail); accounting phase will charge/discharge based on actual battery SoC
+        curtailed_supply_mw: Optional[Sequence[float]] = None,  # Facility-side curtailment power vector, length=week_hours
+        price_vector_per_mwh: Optional[Sequence[float]] = None, # Hourly electricity price ($/MWh), used for cost accounting
+        carbon_vector_kg_per_mwh: Optional[Sequence[float]] = None,  # Hourly carbon intensity (kg CO2 / MWh), only applies to "grid power supply"
+        curtailed_price_per_mwh: float = 0.0,    # Curtailed electricity cost (usually 0)
+        carbon_price_per_ton: float = 0.0,       # Carbon price ($/tCO2), can be 0
+        reserve_frac_for_batt: Optional[float] = None,
+        carry_backlog: Optional[bool] = None
     ) -> pd.DataFrame:
         """
-        在给定策略下，先进行作业调度（得到逐时设施需求），再逐时做能量/成本/碳排的核算。
-        电池策略：只用「弃电盈余」充电；当有缺口时按功率/SoC 放电。剩余缺口由电网供给。
-        注意：这里不做电网套利充电，以确保碳排结果仅由调度与弃电/BESS作用决定。
+        Under given strategy, first perform job scheduling (get hourly facility demand), then do hourly energy/cost/carbon accounting.
+        Battery strategy: only charge with "curtailment surplus"; discharge by power/SoC when there's deficit. Remaining deficit supplied by grid.
+        Note: No grid arbitrage charging here to ensure carbon results are only determined by scheduling and curtailment/BESS effects.
 
-        返回：DataFrame（168 行），包含逐时分解及 .attrs["totals"] 汇总。
+        Returns: DataFrame (168 rows), containing hourly breakdown and .attrs["totals"] summary.
         """
         H = self.config.week_hours
-        # --------- 准备输入向量 ---------
+        # --------- Prepare input vectors ---------
         if curtailed_supply_mw is None:
             curtailed = np.zeros(H, dtype=float)
         else:
@@ -575,35 +571,37 @@ class DataCenter:
             if prices.size < H:
                 raise ValueError("price_vector_per_mwh must have length >= week_hours.")
         else:
-            prices = np.full(H, grid_price_per_mwh, dtype=float)
+            raise ValueError("price_vector_per_mwh is required for simulate().")
 
         if carbon_vector_kg_per_mwh is not None:
             grid_ci = np.asarray(carbon_vector_kg_per_mwh, dtype=float)
             if grid_ci.size < H:
                 raise ValueError("carbon_vector_kg_per_mwh must have length >= week_hours.")
         else:
-            # 如果没给，用一个保守的常数（不建议长期使用）
+            # If not provided, use a conservative constant (not recommended for long-term use)
             grid_ci = np.full(H, 400.0, dtype=float)
 
-        # --------- 先做作业调度 → 得到逐时设施需求 & 作业数 ---------
-        # 你的 demand_facility_mw 应该返回 (facility_mw_array, jobs_scheduled)
+        # --------- First do job scheduling → get hourly facility demand & job count ---------
+        # Your demand_facility_mw should return (facility_mw_array, jobs_scheduled)
         demand_mw, jobs_scheduled = self.demand_facility_mw(
             strategy=strategy,
             use_battery=use_battery,
             curtailed_supply_mw=curtailed,
             price_vector_per_mwh=prices,
             carbon_vector_kg_per_mwh=grid_ci,
+            reserve_frac_for_batt=reserve_frac_for_batt,
+            carry_backlog=carry_backlog
         )
 
         if demand_mw.size != H:
             raise ValueError("demand_facility_mw must return an array of length week_hours.")
 
-        # --------- 初始化日志 ---------
+        # --------- Initialize log ---------
         log = {
             "hour": np.arange(H),
             "demand_mw": demand_mw.astype(float).copy(),
             "met_by_curtail_mw": np.zeros(H, dtype=float),
-            "battery_charge_mw": np.zeros(H, dtype=float),     # 以「功率等效」记录（1h 步长 → MWh == MW）
+            "battery_charge_mw": np.zeros(H, dtype=float),     # Record as "power equivalent" (1h step → MWh == MW)
             "battery_discharge_mw": np.zeros(H, dtype=float),
             "met_by_grid_mw": np.zeros(H, dtype=float),
             "spilled_curtail_mw": np.zeros(H, dtype=float),
@@ -612,61 +610,61 @@ class DataCenter:
             "emissions_kg": np.zeros(H, dtype=float),
         }
 
-        # # --------- 电池初始状态 ---------
+        # # --------- Battery initial state ---------
         # if reset_battery_soc and self.battery is not None:
         #     self.battery.reset_soc(0.0)
 
         pue = float(self.config.pue)
 
-        # --------- 逐小时核算 ---------
+        # --------- Hourly accounting ---------
         for h in range(H):
-            demand = demand_mw[h]                 # 本小时设施侧需求（MW）
-            curtail_fac = max(curtailed[h], 0.0)  # 本小时设施侧可用弃电（MW）
+            demand = demand_mw[h]                 # This hour's facility-side demand (MW)
+            curtail_fac = max(curtailed[h], 0.0)  # This hour's facility-side available curtailment (MW)
 
-            # 1) 先用弃电直接满足需求
+            # 1) First use curtailment to directly meet demand
             use_from_curtail = min(demand, curtail_fac)
             log["met_by_curtail_mw"][h] = use_from_curtail
 
-            # 2) 计算盈余弃电，并用盈余为电池充电（若有）
-            surplus_curtail = max(curtail_fac - use_from_curtail, 0.0)  # 设施侧 MW
+            # 2) Calculate surplus curtailment and use surplus to charge battery (if any)
+            surplus_curtail = max(curtail_fac - use_from_curtail, 0.0)  # Facility-side MW
             if self.battery is not None and surplus_curtail > 1e-12:
-                charged_mwh = self.battery.charge(request_mw=surplus_curtail, hours=1.0)  # 返回的是输入能量 MWh
-                log["battery_charge_mw"][h] = charged_mwh  # 1 小时步长 → 直接当成 MW 记录
-                # 弃电充电的能量计入弃电成本/碳（通常为 0）
+                charged_mwh = self.battery.charge(request_mw=surplus_curtail, hours=1.0)  # Returns input energy MWh
+                log["battery_charge_mw"][h] = charged_mwh  # 1 hour step → record directly as MW
+                # Curtailed energy for charging counts as curtailed cost/carbon (usually 0)
                 log["cost_usd"][h] += charged_mwh * float(curtailed_price_per_mwh)
-                # 弃电视为 0 碳，若你有小于零的边际碳也可在此处传入
-                # 这里保持与 grid_ci 分离：弃电不乘 grid_ci
+                # Curtailed energy treated as 0 carbon, can pass negative marginal carbon here if needed
+                # Keep separate from grid_ci: curtailed energy doesn't multiply by grid_ci
             else:
-                # 没有电池或无法充，就把弃电溢出记为 spilled
+                # No battery or can't charge, record curtailed overflow as spilled
                 log["spilled_curtail_mw"][h] = surplus_curtail
 
-            # 3) 若弃电不足，则依次用电池放电 → 电网补缺
+            # 3) If curtailment insufficient, use battery discharge → grid makes up deficit
             remaining = demand - use_from_curtail
             if remaining > 1e-12 and self.battery is not None:
                 discharged_mwh = self.battery.discharge(request_mw=remaining, hours=1.0)
                 log["battery_discharge_mw"][h] = discharged_mwh
                 remaining = max(remaining - discharged_mwh, 0.0)
 
-            # 4) 剩余缺口由电网供给，并据此计算成本/碳价（弃电供能不计电网碳）
+            # 4) Remaining deficit supplied by grid, calculate cost/carbon price (curtailed energy doesn't count grid carbon)
             if remaining > 1e-12:
                 log["met_by_grid_mw"][h] = remaining
                 price = float(prices[h])
                 ci = float(grid_ci[h])
-                # 直接成本
+                # Direct cost
                 log["cost_usd"][h] += remaining * price
-                # 电网能量对应的碳
+                # Grid energy corresponding carbon
                 energy_emissions_kg = remaining * ci
                 log["emissions_kg"][h] += energy_emissions_kg
-                # 碳价（若有）
+                # Carbon price (if any)
                 if carbon_price_per_ton > 0.0:
                     log["cost_usd"][h] += (energy_emissions_kg / 1000.0) * float(carbon_price_per_ton)
 
-            # 5) 用弃电供给到负载（不是充电）的那部分计算弃电成本（通常为 0 碳/0 成本）
+            # 5) Curtailed energy supplied to load (not charging) calculates curtailed cost (usually 0 carbon/0 cost)
             if use_from_curtail > 1e-12:
                 log["cost_usd"][h] += use_from_curtail * float(curtailed_price_per_mwh)
-                # 若你有非零弃电碳强度，可以在这里额外加上；当前假设 0。
+                # If you have non-zero curtailed carbon intensity, can add here; currently assumes 0.
 
-            # 记录 SoC
+            # Record SoC
             if self.battery is not None:
                 log["battery_soc_mwh"][h] = self.battery.soc_mwh
             else:
@@ -674,7 +672,7 @@ class DataCenter:
 
         df = pd.DataFrame(log)
 
-        # --------- 汇总 ---------
+        # --------- Summary ---------
         totals = {
             "jobs_scheduled": int(jobs_scheduled),
             "total_energy_mwh": float(df["demand_mw"].sum()),

@@ -2,8 +2,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Load data
-high_curtailment = pd.read_csv('vector_high_curtailment_week.csv')
-high_volatility = pd.read_csv('vector_high_volatility_week.csv')
+high_curtailment = pd.read_csv('vector_high_curtailment_week_v2.csv')
+high_volatility = pd.read_csv('vector_high_volatility_week_v2.csv')
 high_curtailment['datetime'] = pd.to_datetime(high_curtailment['datetime'])
 high_volatility['datetime'] = pd.to_datetime(high_volatility['datetime'])
 
