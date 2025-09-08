@@ -1,12 +1,38 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from datacenter import DataCenter, DataCenterConfig
+from battery import Battery
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
-def calculate_total_cost_with_capex():
+def calculate_total_cost_with_capex(annual=False):
     """Calculate total cost including amortized CapEx for datacenter and battery"""
     
-    # Load results
-    df = pd.read_csv("battery_analysis_results_high_curtailment.csv")
+    if annual:
+        # Process 12 months from Excel file in parallel
+        excel_file = "monthly_representative_vectors_with_carbon.xlsx"
+        print("Running annual analysis (12 months in parallel)...")
+        
+        # Sequential processing for debugging
+        all_results = []
+        for month in tqdm(range(1, 13), desc="Processing months"):
+            result = simulate_month_battery_analysis(excel_file, month)
+            all_results.append(result)
+        
+        print("Averaging results across 12 months...")
+        
+        # Average results across months
+        df = pd.concat(all_results).groupby(['strategy', 'battery_capacity_mw']).agg({
+            'total_jobs_scheduled': 'mean',
+            'total_cost_usd': 'mean', 
+            'total_carbon_kg': 'mean',
+            'carbon_per_job': 'mean',
+            'total_energy_mwh': 'mean'
+        }).reset_index()
+    else:
+        # Load single results file
+        df = pd.read_csv("battery_analysis_results_high_curtailment.csv")
     
     # Datacenter CapEx (amortized over 10 years to weekly basis)
     DC_LAND_COST = 2_250_000
@@ -56,23 +82,85 @@ def calculate_total_cost_with_capex():
     
     return pd.DataFrame(results)
 
-def plot_battery_impact():
+def simulate_month_battery_analysis(excel_file, month):
+    """Simulate battery analysis for one month"""
+    print(f"Starting Month {month}...")
+    
+    # Check available sheet names first
+    if month == 1:
+        xl_file = pd.ExcelFile(excel_file)
+        print(f"Available sheets: {xl_file.sheet_names}")
+    
+    # Read month data using 0-indexed sheet position
+    month_df = pd.read_excel(excel_file, sheet_name=month-1)
+    
+    # Extract vectors
+    print(f"Month {month}: Columns available: {list(month_df.columns)}")
+    curtailed_supply = month_df["Total_Curtailment_NP15_MW"].values[:168]
+    carbon_lbs = month_df["marginal_co2_lbs_per_mwh"].values[:168] 
+    carbon_intensity = carbon_lbs * 0.453592  # Convert to kg
+    prices = month_df["LMP_NP15"].values[:168]
+    print(f"Month {month}: Extracted data vectors (shape: {month_df.shape})")
+    
+    # Setup datacenter
+    config = DataCenterConfig(capacity_mw=16.67, pue=1.2, week_hours=168)
+    dc = DataCenter(csv_path="/z/azure/vmtable.csv", config=config, scale_jobs=True)
+    print(f"Month {month}: Setup datacenter")
+    
+    results = []
+    strategies = ["as_is", "only_curtail", "carbon_aware"]
+    battery_capacities = [0, 5, 10, 15, 20]
+    
+    for strategy in strategies:
+        print(f"Month {month}: Running {strategy} strategy...")
+        for battery_mw in battery_capacities:
+            # Setup battery
+            if battery_mw > 0:
+                dc.battery = Battery(capacity_mwh=battery_mw*4, max_charge_mw=battery_mw, max_discharge_mw=battery_mw)
+            else:
+                dc.battery = None
+            
+            # Run simulation
+            sim_df = dc.simulate(
+                strategy=strategy,
+                use_battery=(battery_mw > 0),
+                curtailed_supply_mw=curtailed_supply,
+                price_vector_per_mwh=prices,
+                carbon_vector_kg_per_mwh=carbon_intensity
+            )
+            
+            totals = sim_df.attrs["totals"]
+            results.append({
+                'strategy': strategy,
+                'battery_capacity_mw': battery_mw,
+                'total_jobs_scheduled': totals['jobs_scheduled'],
+                'total_cost_usd': totals['total_cost_usd'],
+                'total_carbon_kg': totals['total_emissions_kg'],
+                'carbon_per_job': totals['total_emissions_kg'] / max(totals['jobs_scheduled'], 1),
+                'total_energy_mwh': totals['total_energy_mwh']
+            })
+    
+    print(f"Month {month}: Completed all simulations")
+    return pd.DataFrame(results)
+
+def plot_battery_impact(annual=False):
     """Create 1x2 plot showing battery impact analysis"""
     
-    df = calculate_total_cost_with_capex()
+    df = calculate_total_cost_with_capex(annual=annual)
+    title_suffix = " (Year Avg)" if annual else ""
     
     # Setup plot - 1 row, 2 columns
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(7, 3))
     
     strategies = df['strategy'].unique()
-    colors = {'as_is': 'blue', 'only_curtail': 'red', 'carbon_aware': 'green'}
+    colors = {'as_is': '#2E86AB', 'only_curtail': '#A23B72', 'carbon_aware': '#F18F01'}
     
     # Left plot: Total Cost (left y-axis) and Carbon (right y-axis)
     for strategy in strategies:
         strategy_data = df[df['strategy'] == strategy].sort_values('battery_capacity_mw')
         ax1.plot(strategy_data['battery_capacity_mw'], strategy_data['total_weekly_cost']/1000, 
-                'o-', color=colors[strategy], label=f'{strategy} (Cost)', linewidth=2, markersize=4)
-    
+                'o-', color=colors[strategy], label=f'Cost of\n{strategy}', linewidth=2, markersize=4, alpha=0.8)
+
     ax1.set_xlabel('Battery Capacity (MW)')
     ax1.set_ylabel('Total Weekly Cost ($k)', color='black')
     ax1.tick_params(axis='y', labelcolor='black')
@@ -83,24 +171,19 @@ def plot_battery_impact():
     for strategy in strategies:
         strategy_data = df[df['strategy'] == strategy].sort_values('battery_capacity_mw')
         ax1_twin.plot(strategy_data['battery_capacity_mw'], strategy_data['total_carbon_kg'],
-                     's-', color=colors[strategy], label=f'{strategy} (Carbon)', linewidth=3, markersize=6, alpha=1.0, dashes=[5, 5])
-    
-    ax1_twin.set_ylabel('Total Carbon (kg CO2)', color='gray')
+                     's-', color=colors[strategy], label=f'Emissions of\n{strategy}', linewidth=3, markersize=6, alpha=0.8, dashes=[5, 5])
+
+    ax1_twin.set_ylabel('Total Emissions (kg CO2)', color='gray')
     ax1_twin.tick_params(axis='y', labelcolor='gray')
-    
-    # Combine legends
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax1_twin.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right', fontsize=8)
-    
-    ax1.set_title('Total Cost & Carbon vs Battery Capacity')
+
+    ax1.set_title(f'Total Cost & Emissions vs Battery Capacity{title_suffix}')
     
     # Right plot: Cost per Job (left y-axis) and Carbon per Job (right y-axis)
     for strategy in strategies:
         strategy_data = df[df['strategy'] == strategy].sort_values('battery_capacity_mw')
         ax2.plot(strategy_data['battery_capacity_mw'], strategy_data['cost_per_job'],
-                'o-', color=colors[strategy], label=f'{strategy} (Cost)', linewidth=2, markersize=4)
-    
+                'o-', color=colors[strategy], label=f'Cost of\n{strategy}', linewidth=2, markersize=4, alpha=0.8)
+
     ax2.set_xlabel('Battery Capacity (MW)')
     ax2.set_ylabel('Cost per Job ($)', color='black')
     ax2.tick_params(axis='y', labelcolor='black')
@@ -111,27 +194,29 @@ def plot_battery_impact():
     for strategy in strategies:
         strategy_data = df[df['strategy'] == strategy].sort_values('battery_capacity_mw')
         ax2_twin.plot(strategy_data['battery_capacity_mw'], strategy_data['carbon_per_job'],
-                     's--', color=colors[strategy], label=f'{strategy} (Carbon)', linewidth=3, markersize=6, alpha=1.0, dashes=[5, 5])
-    
-    ax2_twin.set_ylabel('Carbon per Job (kg CO2)', color='gray')
+                     's--', color=colors[strategy], label=f'Emissions of\n{strategy}', linewidth=3, markersize=6, alpha=0.8, dashes=[5, 5])
+
+    ax2_twin.set_ylabel('Emissions per Job (kg CO2)', color='gray')
     ax2_twin.tick_params(axis='y', labelcolor='gray')
-    
-    # Combine legends
-    lines1, labels1 = ax2.get_legend_handles_labels()
-    lines2, labels2 = ax2_twin.get_legend_handles_labels()
-    ax2.legend(lines1 + lines2, labels1 + labels2, loc='center right', fontsize=8)
-    
-    ax2.set_title('Per-Job Cost & Carbon vs Battery Capacity')
+
+    ax2.set_title(f'Per-Job Cost & Emissions vs Battery Capacity{title_suffix}')
+
+    # Create combined legend outside the plots
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax1_twin.get_legend_handles_labels()
+    fig.legend(lines1 + lines2, labels1 + labels2, loc='center right', fontsize=10, bbox_to_anchor=(1.2, 0.45))
     
     plt.tight_layout()
-    plt.savefig('battery_impact_analysis.pdf', dpi=150, bbox_inches='tight')
-    print("Battery impact analysis saved to 'battery_impact_analysis.pdf'")
+    filename = 'battery_impact_analysis_annual.pdf' if annual else 'battery_impact_analysis.pdf'
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
+    print(f"Battery impact analysis saved to '{filename}'")
     
     return df
 
-def print_summary(df):
+def print_summary(df, annual=False):
     """Print summary statistics"""
-    print("\n=== Battery Impact Analysis Summary ===")
+    suffix = " (Annual Average)" if annual else ""
+    print(f"\n=== Battery Impact Analysis Summary{suffix} ===")
     
     # Weekly datacenter CapEx
     total_dc_capex = 2_250_000 + 180_000_000 + 600_000 + 60_000
@@ -157,10 +242,10 @@ def print_summary(df):
             print(f"    Battery CapEx: ${row['weekly_battery_capex']:,.0f}")
             print(f"    Total: ${row['total_weekly_cost']:,.0f}")
 
-def plot_pareto_frontier():
+def plot_pareto_frontier(annual=False):
     """Plot Pareto frontier of carbon vs cost for different battery sizes"""
     
-    df = calculate_total_cost_with_capex()
+    df = calculate_total_cost_with_capex(annual=annual)
     
     # Setup plot
     fig, ax = plt.subplots(1, 1, figsize=(4, 4))
@@ -217,10 +302,10 @@ def plot_pareto_frontier():
     plt.savefig('pareto_frontier_carbon_vs_cost.pdf', dpi=150, bbox_inches='tight')
     print("Pareto frontier plot saved to 'pareto_frontier_carbon_vs_cost.pdf'")
 
-def plot_pareto_frontier_per_job():
+def plot_pareto_frontier_per_job(annual=False):
     """Plot Pareto frontier of carbon vs cost per job"""
     
-    df = calculate_total_cost_with_capex()
+    df = calculate_total_cost_with_capex(annual=annual)
 
     fig, ax = plt.subplots(1, 1, figsize=(5, 5))
 
@@ -279,13 +364,18 @@ def plot_pareto_frontier_per_job():
             print(f"  {row['battery_capacity_mw']} MW: ${row['total_weekly_cost']:,.0f}, {row['total_carbon_kg']:,.0f} kg CO2")
 
 if __name__ == "__main__":
-    df_results = plot_battery_impact()
-    print_summary(df_results)
+    import sys
+    annual = len(sys.argv) > 1 and sys.argv[1] == '--annual'
+    
+    print("Starting battery impact analysis...")
+    df_results = plot_battery_impact(annual=annual)
+    print_summary(df_results, annual=annual)
     
     # Plot Pareto frontiers
-    plot_pareto_frontier()
-    plot_pareto_frontier_per_job()
+    plot_pareto_frontier(annual=annual)
+    plot_pareto_frontier_per_job(annual=annual)
     
     # Save detailed results
-    df_results.to_csv("battery_impact_analysis_detailed.csv", index=False)
-    print(f"\nDetailed results saved to 'battery_impact_analysis_detailed.csv'")
+    suffix = '_annual' if annual else ''
+    df_results.to_csv(f"battery_impact_analysis_detailed{suffix}.csv", index=False)
+    print(f"\nDetailed results saved to 'battery_impact_analysis_detailed{suffix}.csv'")

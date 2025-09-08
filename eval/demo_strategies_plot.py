@@ -72,34 +72,40 @@ def main():
     dc = DataCenter(csv_path=vmtable_csv, config=config, scale_jobs=True)
 
     # -----------------------------
-    # Scenario A: jobs as-is (after sampling to fit capacity)
+    # Parallel scenario generation
     # -----------------------------
-    print("Generating Scenario A (as-is, capacity-constrained)...")
-    demand_as_is_fac_mw, _, _ = dc.demand_facility_mw(
-        strategy="as_is",
-        use_battery=False
-    )
-
-    # -----------------------------
-    # Scenario B: curtailment-only scheduling (best-effort)
-    # -----------------------------
-    print("Generating Scenario B (curtailment-only)...")
-    demand_curtail_fac_mw, _, _ = dc.demand_facility_mw(
-        strategy="only_curtail",
-        use_battery=False,                  # 若想用電池延長視窗，改 True（需先在 build_site 時掛電池）
-        curtailed_supply_mw=curtailed_supply
-    )
-
-    # -----------------------------
-    # Scenario C: carbon-aware scheduling
-    # -----------------------------
-    print("Generating Scenario C (carbon-aware)...")
-    demand_carbon_fac_mw, _, _ = dc.demand_facility_mw(
-        strategy="carbon_aware",
-        use_battery=False,
-        carbon_vector_kg_per_mwh=carbon_intensity_week
-        # 可選 price_vector_per_mwh=...
-    )
+    from concurrent.futures import ThreadPoolExecutor
+    
+    def generate_scenario_a():
+        print("Generating Scenario A (as-is, capacity-constrained)...")
+        return dc.demand_facility_mw(strategy="as_is", use_battery=False)
+    
+    def generate_scenario_b():
+        print("Generating Scenario B (curtailment-only)...")
+        return dc.demand_facility_mw(
+            strategy="only_curtail",
+            use_battery=False,
+            curtailed_supply_mw=curtailed_supply
+        )
+    
+    def generate_scenario_c():
+        print("Generating Scenario C (carbon-aware)...")
+        return dc.demand_facility_mw(
+            strategy="carbon_aware",
+            use_battery=False,
+            carbon_vector_kg_per_mwh=carbon_intensity_week
+        )
+    
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {
+            'as_is': executor.submit(generate_scenario_a),
+            'curtail': executor.submit(generate_scenario_b),
+            'carbon': executor.submit(generate_scenario_c)
+        }
+        
+        demand_as_is_fac_mw, _, _ = futures['as_is'].result()
+        demand_curtail_fac_mw, _, _ = futures['curtail'].result()
+        demand_carbon_fac_mw, _, _ = futures['carbon'].result()
 
     # -----------------------------
     # Plotting
@@ -109,21 +115,29 @@ def main():
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(6, 6))
 
-    # Plot 1: original job-trace (unmodified)
-    ax1.plot(hours, raw_demand_mw, linewidth=1.5, label='Original VM trace (facility equiv.)')
-    ax1.set_title('Plot 1: Original Job Trace Power Usage (Unmodified)', fontsize=14)
+    # Plot 1: Price and Carbon Intensity
+    # Load price data
+    if "LMP_NP15" in curtail_df.columns:
+        prices = curtail_df["LMP_NP15"].to_numpy()[:H]
+    else:
+        prices = np.random.uniform(30, 150, H)  # Fallback if no price data
+    
+    ax1.plot(hours, prices, linewidth=1.5, label='Electricity Price', color='blue')
+    ax1.set_title('Plot 1: Electricity Price and Carbon Intensity', fontsize=14)
     ax1.set_xlabel('Hour')
-    ax1.set_ylabel('Power (MW)')
+    ax1.set_ylabel('Price ($/MWh)', color='blue')
+    ax1.tick_params(axis='y', labelcolor='blue')
     ax1.grid(True, alpha=0.3)
 
     # Carbon intensity as secondary axis
     ax1_r = ax1.twinx()
-    ax1_r.plot(hours, carbon_intensity_week, linestyle='--', alpha=0.9, label='Carbon intensity', color='orange')
-    ax1_r.set_ylabel('Carbon Intensity (kg CO₂/MWh)')
+    ax1_r.plot(hours, carbon_intensity_week, linestyle='--', alpha=0.9, label='Carbon intensity', color='red')
+    ax1_r.set_ylabel('Carbon Intensity (kg CO₂/MWh)', color='red')
+    ax1_r.tick_params(axis='y', labelcolor='red')
     # Legends
     ln1, lb1 = ax1.get_legend_handles_labels()
     ln2, lb2 = ax1_r.get_legend_handles_labels()
-    ax1.legend(ln1+ln2, lb1+lb2, loc='upper left')
+    ax1.legend(ln1+ln2, lb1+lb2, loc='lower right', framealpha=1.0)
 
     # Day markers
     for d in range(8):
@@ -133,7 +147,7 @@ def main():
     ax2.plot(hours, demand_as_is_fac_mw, linewidth=1.5, label='a) Jobs as-is (no scheduling)')
     ax2.plot(hours, demand_curtail_fac_mw, linewidth=1.5, label='b) Curtailment-only')
     ax2.plot(hours, demand_carbon_fac_mw, linewidth=1.5, label='c) Carbon-aware')
-    ax2.plot(hours, curtailed_supply, linestyle='--', alpha=0.7, linewidth=1, label='Available curtailed (facility MW)')
+    ax2.fill_between(hours, 0, curtailed_supply, alpha=0.3, color='gray', label='Available curtailed (facility MW)')
 
     ax2.set_title('Plot 2: Datacenter Scheduling Strategies (Facility MW)', fontsize=14)
     ax2.set_xlabel('Hour')
