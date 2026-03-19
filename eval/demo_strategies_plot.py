@@ -13,8 +13,8 @@ def main():
     # Inputs & basic config
     # -----------------------------
     H = 7 * 24
-    hourly_power_path = Path("hourly_power.npy")  # optional (原始 trace 的每小時功率，單位 W)
-    vmtable_csv = "/z/azure/vmtable.csv"         # DataCenter 將用此 CSV 產生作業
+    hourly_power_path = Path("hourly_power.npy")  # optional (original trace hourly power, in W)
+    vmtable_csv = "/z/azure/vmtable.csv"         # DataCenter will generate jobs from this CSV
     grid_case = 'high_curtailment'
     curtail_csv = f"vector_{grid_case}_week_v2.csv"
 
@@ -181,11 +181,11 @@ def main():
     print(stats("Scenario B - curtailment-only", demand_curtail_fac_mw))
     print(stats("Scenario C - carbon-aware", demand_carbon_fac_mw))
 
-    # 粗略的「碳」對比（僅示意：以 facility MWh × 小時碳強度）
+    # Rough carbon comparison (illustrative: facility MWh x hourly carbon intensity)
     ca_emissions_kg = float(np.sum(demand_carbon_fac_mw * carbon_intensity_week))
     print(f"Carbon-aware (rough) emissions over week: {ca_emissions_kg:,.0f} kg CO₂")
 
-    # 利用率 vs 可用棄電
+    # Curtailment utilization vs available curtailed energy
     curtail_used_mwh = float(np.minimum(demand_curtail_fac_mw, curtailed_supply).sum())
     curtail_avail_mwh = float(curtailed_supply.sum())
     util_pct = (curtail_used_mwh / curtail_avail_mwh * 100.0) if curtail_avail_mwh > 1e-9 else 0.0
