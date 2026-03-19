@@ -22,7 +22,7 @@ def main():
     datacenter_it_capacity_mw = datacenter_total_capacity_mw / pue
     
     # Battery configuration
-    battery_capacity_mw = 40.0
+    battery_capacity_mw = 20.0
     battery_duration_hours = 4.0
 
     # -----------------------------
@@ -100,7 +100,7 @@ def main():
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(8, 6))
 
     # Plot 1: Price and Carbon Intensity (top-left)
-    ax1.plot(hours, prices, linewidth=1.5, label='Electricity Price', color='blue')
+    ax1.plot(hours, prices, linewidth=1.5, label='Electricity Price', color="#55CCFF")
     ax1.set_title('Electricity Price and Carbon Intensity', fontsize=12)
     ax1.set_xlabel('Hour')
     ax1.set_ylabel('Price ($/MWh)', color='blue')
@@ -108,18 +108,24 @@ def main():
     ax1.grid(True, alpha=0.3)
 
     ax1_r = ax1.twinx()
-    ax1_r.plot(hours, carbon_intensity_week, linestyle='--', alpha=0.9, label='Carbon intensity', color='red', zorder=1)
+    ax1_r.plot(hours, carbon_intensity_week, linestyle='--', alpha=0.9, label='Carbon intensity', color='#A23B72', zorder=1)
     ax1_r.set_ylabel('Carbon Intensity (kg CO₂/MWh)', color='red')
     ax1_r.tick_params(axis='y', labelcolor='red')
     
     ln1, lb1 = ax1.get_legend_handles_labels()
     ln2, lb2 = ax1_r.get_legend_handles_labels()
-    ax1.legend(ln1+ln2, lb1+lb2, loc='lower right', framealpha=1.0, fancybox=False, edgecolor='black', zorder=10)
+    legend = ax1.legend(ln1+ln2, lb1+lb2, loc='lower right', framealpha=1.0, fancybox=False, edgecolor='black')
+    legend.set_zorder(10)
 
-    # Plot 2: Battery Charge/Discharge (Curtail-only) (top-right)
-    ax2.plot(hours, with_battery['curtail_batt']['charge_mw'], linewidth=1.5, label='Charge', color='green')
-    ax2.plot(hours, -with_battery['curtail_batt']['discharge_mw'], linewidth=1.5, label='Discharge', color='red')
-    ax2.set_title('Battery Charge/Discharge (Curtail-only)', fontsize=12)
+    # Plot 2: Battery Charge/Discharge (top-right)
+    ax2.plot(hours, with_battery['curtail_batt']['charge_mw'], linewidth=1.5, label='Curtail-only Charge', color='green')
+    ax2.plot(hours, -with_battery['curtail_batt']['discharge_mw'], linewidth=1.5, label='Curtail-only Discharge', color='red')
+    
+    # Add grid-based battery operations (as_is and carbon_aware use same grid-based strategy)
+    ax2.plot(hours, with_battery['as_is_batt']['charge_mw'], linewidth=1.5, label='Grid-based Charge', color='lightgreen', linestyle='--')
+    ax2.plot(hours, -with_battery['as_is_batt']['discharge_mw'], linewidth=1.5, label='Grid-based Discharge', color='orange', linestyle='--')
+    
+    ax2.set_title('Battery Charge/Discharge Strategies', fontsize=12)
     ax2.set_xlabel('Hour')
     ax2.set_ylabel('Power (MW)')
     ax2.grid(True, alpha=0.3)
@@ -160,6 +166,55 @@ def main():
     plt.tight_layout()
     plt.savefig(f'power_usage_comparison_combined_{grid_case}.pdf', dpi=150, bbox_inches='tight')
     print(f"Saved: power_usage_comparison_combined_{grid_case}.pdf")
+
+    # -----------------------------
+    # Export data to CSV files
+    # -----------------------------
+    print("Exporting plot data to CSV files...")
+    
+    # Plot 1 data: Price and Carbon Intensity
+    plot1_data = pd.DataFrame({
+        'Hour': hours,
+        'Electricity_Price_USD_per_MWh': prices,
+        'Carbon_Intensity_kg_CO2_per_MWh': carbon_intensity_week
+    })
+    plot1_data.to_csv(f'plot1_price_carbon_{grid_case}.csv', index=False)
+    
+    # Plot 2 data: Battery operations
+    plot2_data = pd.DataFrame({
+        'Hour': hours,
+        'Curtail_Battery_Charge_MW': with_battery['curtail_batt']['charge_mw'],
+        'Curtail_Battery_Discharge_MW': with_battery['curtail_batt']['discharge_mw'],
+        'Grid_Battery_Charge_MW': with_battery['as_is_batt']['charge_mw'],
+        'Grid_Battery_Discharge_MW': with_battery['as_is_batt']['discharge_mw']
+    })
+    plot2_data.to_csv(f'plot2_battery_operations_{grid_case}.csv', index=False)
+    
+    # Plot 3 data: DC strategies without battery
+    plot3_data = pd.DataFrame({
+        'Hour': hours,
+        'Jobs_As_Is_MW': no_battery['as_is'],
+        'Curtailment_Only_MW': no_battery['curtail'],
+        'Carbon_Aware_MW': no_battery['carbon'],
+        'Curtailment_Available_MW': curtailed_supply
+    })
+    plot3_data.to_csv(f'plot3_dc_strategies_no_battery_{grid_case}.csv', index=False)
+    
+    # Plot 4 data: DC strategies with battery
+    plot4_data = pd.DataFrame({
+        'Hour': hours,
+        'Jobs_As_Is_With_Battery_MW': with_battery['as_is'],
+        'Curtailment_Only_With_Battery_MW': with_battery['curtail'],
+        'Carbon_Aware_With_Battery_MW': with_battery['carbon'],
+        'Curtailment_Available_MW': curtailed_supply
+    })
+    plot4_data.to_csv(f'plot4_dc_strategies_with_battery_{grid_case}.csv', index=False)
+    
+    print(f"CSV files exported:")
+    print(f"  - plot1_price_carbon_{grid_case}.csv")
+    print(f"  - plot2_battery_operations_{grid_case}.csv")
+    print(f"  - plot3_dc_strategies_no_battery_{grid_case}.csv")
+    print(f"  - plot4_dc_strategies_with_battery_{grid_case}.csv")
 
 if __name__ == "__main__":
     main()
