@@ -62,3 +62,6 @@ eval/*.csv
 
 # Internal-only docs
 TEAM_UPDATE.md
+
+# Local validation run outputs
+validation/
