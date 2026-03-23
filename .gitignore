@@ -38,15 +38,27 @@ wheels/
 .DS_Store
 Thumbs.db
 
-# Data files (large files - uncomment if you want to exclude from git)
-# *.csv
-# *.xlsx
-# *.pdf
-# *.png
+# Large external raw data kept local
+data/LMP_Data/*.csv
+data/productionandcurtailmentsdata_*.xlsx
+data/wind-solar-daily-market-watch-*.xlsx
+data/curtailed-non-operational-generator-*.xlsx
+data/~$*.xlsx
+LMP_Data.zip
 
-# Outputs (uncomment if you want to exclude generated outputs)
-# outputs/*.png
-# outputs/*.csv
+# Third-party reference documents kept local unless redistribution is confirmed
+data/*.pdf
+/*.pdf
 
-# Archived files (uncomment if you want to exclude archived files)
-# misc/archived_files/*
+# Scratch notebooks and ad hoc exports at repo root
+/*.ipynb
+/*.csv
+/*.png
+
+# Generated visuals and local eval artifacts
+notebooks/*.png
+eval/*.png
+eval/*.csv
+
+# Internal-only docs
+TEAM_UPDATE.md

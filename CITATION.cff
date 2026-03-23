@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+title: Curtailed-2-Compute
+message: "If you use this repository, please cite it using the metadata below."
+type: software
+authors:
+  - family-names: Yu
+    given-names: Lauren
+  - family-names: Xing
+    given-names: Jiali
+  - family-names: Yu
+    given-names: Lindsey
+repository-code: https://github.com/pennsail/Curtailed-2-Compute
+url: https://github.com/pennsail/Curtailed-2-Compute
+license: MIT
+abstract: >
+  Public research workflow for analyzing CAISO curtailment patterns and
+  parameterized economic scenarios for flexible data center loads.
