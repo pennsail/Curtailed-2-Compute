@@ -82,7 +82,7 @@ class Battery:
         self.soc_mwh = max(self.soc_mwh - soc_drop, 0.0)
         return energy_delivered_mwh
 
-    # battery.py 末尾加上兩個方法（或放在 class 內任何位置都可）
+    # Two methods appended to battery.py (can be placed anywhere inside the class)
 
     def snapshot(self) -> float:
         """Return a lightweight snapshot of state-of-charge (MWh)."""

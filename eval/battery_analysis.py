@@ -7,9 +7,9 @@ from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
 import copy
 
-# ---- Strategy knobs for "only_curtail" (透傳到 datacenter) ----
-RESERVE_FRAC_FOR_BATT = 0.40   # 每個有棄電的小時預留 20% 功率給電池充電
-CARRY_BACKLOG = True           # 前一天沒排到的作業帶到隔天
+# ---- Strategy knobs for "only_curtail" (passed through to datacenter) ----
+RESERVE_FRAC_FOR_BATT = 0.40   # Reserve 20% of power for battery charging during curtailment hours
+CARRY_BACKLOG = True           # Carry unscheduled jobs from the previous day to the next day
 
 H = 168  # one week in hours
 scale_jobs = True  # scale jobs to fit capacity
