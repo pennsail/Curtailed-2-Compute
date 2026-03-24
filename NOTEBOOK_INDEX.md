@@ -1,8 +1,6 @@
 # Notebook Index
 
-This index covers the notebooks that make up the intended public research workflow.
-
-## Canonical Notebook Sequence
+## Notebooks
 
 ### `notebooks/01_curtailed_energy_analysis.ipynb`
 
@@ -36,15 +34,6 @@ This index covers the notebooks that make up the intended public research workfl
 ### `notebooks/build_avg_daily_curtailment_by_season_and_year.py`
 
 - helper script for producing one of the summary CSV artifacts from the notebook workflow
-
-## Not Included in the Public Workflow
-
-The following repository content should be treated as exploratory or under review rather than canonical:
-
-- root-level notebooks such as `datacenter_ABC_optimizer_fixed_capex_opex.ipynb`
-- patched notebook variants such as `npv-adjustments_patched*.ipynb`
-- generated plots and scratch exports
-- `eval/`, which depends on non-public Azure VM traces and requires separate review
 
 ## Recommended Order
 

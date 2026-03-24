@@ -51,16 +51,7 @@ The workflow is sequential. Earlier notebooks define cleaned inputs and scenario
 | `04_electricity_costs_analysis.ipynb` | LMP vectors and tariff assumptions | Scenario electricity cost comparisons |
 | `05_scenario_financial_analysis.ipynb` | Scenario cost outputs and model assumptions | NPV, IRR, rent, and sensitivity results |
 
-## 5. Recommended Release-Friendly Workflow
-
-If you are preparing a public branch or release:
-
-1. Keep the notebook sequence and documentation in the repo.
-2. Keep only small derived inputs and summary outputs that materially help reproducibility.
-3. Keep raw CAISO downloads, third-party reports, and scratch exports out of Git.
-4. Treat `eval/` as experimental until the battery and workload path is reviewed for public-data compatibility.
-
-## 6. Troubleshooting
+## 5. Troubleshooting
 
 ### Missing raw files
 
@@ -77,15 +68,15 @@ If you are preparing a public branch or release:
 - Load one year or one month at a time when exploring raw data.
 - Save compact intermediate results instead of repeatedly re-reading the full raw archive.
 
-### Non-public battery workflow
+### Evaluation workflow
 
-- Do not assume `eval/` is runnable from public data.
-- Review `eval/README.md` before attempting to publish or reuse that part of the repository.
+- The `eval/` directory includes a bundled synthetic workload and runs out of the box.
+- See `eval/README.md` for details.
 
-## 7. Related Docs
+## 6. Related Docs
 
-- `README.md` for scope and release policy
-- `DATA_SOURCES.md` for source systems and redistribution guidance
+- `README.md` for project overview
+- `DATA_SOURCES.md` for source systems and field descriptions
 - `WORKFLOW_GUIDE.md` for the notebook-by-notebook narrative
-- `NOTEBOOK_INDEX.md` for a quick reference to the canonical notebooks
+- `NOTEBOOK_INDEX.md` for a quick reference to the notebooks
 

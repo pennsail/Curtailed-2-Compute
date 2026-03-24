@@ -1,42 +1,24 @@
 # Data Directory
 
-This directory is intentionally a mix of:
+## Included Files
 
-- small derived files that are appropriate to keep in the public repository
-- local folders where users place raw CAISO downloads when reproducing the workflow
-
-## Included in the public repository
-
-The public release can include small support files that are directly referenced by the canonical notebook workflow:
+Supporting inputs referenced by the notebook workflow:
 
 - `caiso_wind_solar_pcm.csv`
 - `congestion_costs.csv`
 - `local_generation_mix_fresno.csv`
 - `transmission_project_costs.csv`
 
-The lightweight reproducibility assets live in `data/processed/`:
+Derived reproducibility assets in `data/processed/`:
 
-- `vector_high_curtailment_week.csv`
-- `vector_high_volatility_week.csv`
+- `vector_high_curtailment_week.csv` — representative 168-hour high-curtailment week
+- `vector_high_volatility_week.csv` — representative 168-hour high-price-volatility week
 
-These files are compact inputs or derived products that help users run the public workflow without committing the full raw CAISO archive.
+## External Raw Inputs
 
-## Expected local raw inputs
+To run the full analysis from scratch, download these separately:
 
-These files should be downloaded separately and kept local unless you have explicitly decided to publish them:
+- `productionandcurtailmentsdata_YYYY.xlsx` — place in `data/` ([CAISO Managing Oversupply](https://www.caiso.com/informed/Pages/ManagingOversupply.aspx))
+- `YYYYMM_LMP.csv` — place in `data/LMP_Data/` ([CAISO OASIS](http://oasis.caiso.com/))
 
-- `productionandcurtailmentsdata_YYYY.xlsx` in `data/`
-- `YYYYMM_LMP.csv` in `data/LMP_Data/`
-
-See `../DATA_SOURCES.md` for the source systems and expected filename patterns.
-
-## Keep Out of the Public Release by Default
-
-Unless redistribution is reviewed, do not commit:
-
-- raw CAISO workbooks and monthly LMP exports
-- third-party PDFs and reports
-- temporary Office lock files such as `~$*.xlsx`
-- scratch data pulls that were only used during exploratory analysis
-
-When in doubt, link to the original source and document how to download the file instead of committing it.
+See `../DATA_SOURCES.md` for full details on source systems and field descriptions.

@@ -1,12 +1,10 @@
 # Workflow Guide
 
-This repository has one canonical public workflow:
+The notebook sequence runs in order:
 
 ```text
 01 -> 02 -> 03 -> 04 -> 05
 ```
-
-The steps below describe the intended release-ready notebook sequence. Anything outside this sequence should be treated as exploratory unless documented otherwise.
 
 ## Step 1: `notebooks/01_curtailed_energy_analysis.ipynb`
 
@@ -93,14 +91,4 @@ The steps below describe the intended release-ready notebook sequence. Anything 
 | `03_lmp_vectors.ipynb` | Notebooks 01 and 02 plus monthly LMP files |
 | `04_electricity_costs_analysis.ipynb` | Representative vectors and scenario assumptions |
 | `05_scenario_financial_analysis.ipynb` | Scenario cost results and financial assumptions |
-
-## Public Workflow Boundaries
-
-The following items are intentionally outside the canonical public workflow:
-
-- root-level exploratory notebooks
-- temporary plots and scratch exports
-- `eval/`, which currently depends on non-public Azure VM traces
-
-If you are preparing a public release, keep the numbered notebook sequence and its lightweight derived inputs, and review everything else before committing it.
 
