@@ -59,6 +59,7 @@ data/*.pdf
 notebooks/*.png
 eval/*.png
 eval/*.csv
+!eval/vmtable.csv          # synthetic bundled workload, must be tracked
 
 # Internal-only docs
 TEAM_UPDATE.md

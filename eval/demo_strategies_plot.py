@@ -14,7 +14,7 @@ def main():
     # -----------------------------
     H = 7 * 24
     hourly_power_path = Path("hourly_power.npy")  # optional (original trace hourly power, in W)
-    vmtable_csv = "/z/azure/vmtable.csv"         # DataCenter will generate jobs from this CSV
+    vmtable_csv = "vmtable.csv"  # synthetic workload included in repo; replace with real Azure vmtable for full-scale runs
     grid_case = 'high_curtailment'
     curtail_csv = f"vector_{grid_case}_week_v2.csv"
 

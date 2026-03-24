@@ -1,7 +1,13 @@
+# analyze_azure_vms.py
+# Pre-processing script for the raw Azure VM Traces public dataset.
+# Download vmtable.csv from: https://github.com/Azure/AzurePublicDataset
+# Then set VMTABLE_PATH below (or place vmtable.csv in this directory).
 import pandas as pd
 import numpy as np
 from datetime import datetime
 import time
+
+VMTABLE_PATH = "vmtable.csv"  # update to the full Azure dataset path for full-scale analysis
 
 # Power model parameter
 WATTS_PER_VCPU = 20.0  # W per vCPU at 100% utilization
@@ -18,7 +24,7 @@ def load_azure_vms():
         'vm id', 'subscription id', 'deployment id', 'timestamp vm created', 'timestamp vm deleted',
         'max cpu', 'avg cpu', 'p95 max cpu', 'vm category', 'vm virtual core count bucket', 'vm memory (gb) bucket'
     ]
-    vmtable_df = pd.read_csv('/z/azure/vmtable.csv', header=None)
+    vmtable_df = pd.read_csv(VMTABLE_PATH, header=None)
     vmtable_df.columns = column_headers
     
     print(f"Loaded {len(vmtable_df):,} VMs")

@@ -104,7 +104,7 @@ def simulate_month_battery_analysis(excel_file, month):
     
     # Setup datacenter
     config = DataCenterConfig(capacity_mw=16.67, pue=1.2, week_hours=168)
-    dc = DataCenter(csv_path="/z/azure/vmtable.csv", config=config, scale_jobs=True)
+    dc = DataCenter(csv_path="vmtable.csv", config=config, scale_jobs=True)  # synthetic workload included in repo
     print(f"Month {month}: Setup datacenter")
     
     results = []

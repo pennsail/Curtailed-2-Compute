@@ -13,7 +13,7 @@ def main():
     # Inputs & basic config
     # -----------------------------
     H = 7 * 24
-    vmtable_csv = "/z/azure/vmtable.csv"
+    vmtable_csv = "vmtable.csv"  # synthetic workload included in repo; replace with real Azure vmtable for full-scale runs
     grid_case = 'high_curtailment'
     curtail_csv = f"vector_{grid_case}_week_v2.csv"
 

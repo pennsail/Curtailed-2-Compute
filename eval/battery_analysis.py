@@ -14,6 +14,7 @@ CARRY_BACKLOG = True           # Carry unscheduled jobs from the previous day to
 H = 168  # one week in hours
 scale_jobs = True  # scale jobs to fit capacity
 grid_case = 'high_curtailment'
+VMTABLE_CSV = "vmtable.csv"  # synthetic workload included in repo; replace with real Azure vmtable for full-scale runs
 
 # -------------------------
 # Loaders (strict checking)
@@ -136,7 +137,7 @@ def run_analysis_task(task_args):
     strategy, batt_mw, config, price_vector, curtailed_supply, carbon_vector, bess_params, job_scale_factor = task_args
     
     # Create fresh DataCenter instance for each task to avoid shared state issues
-    dc = DataCenter(csv_path="/z/azure/vmtable.csv", config=config, scale_jobs=scale_jobs)
+    dc = DataCenter(csv_path=VMTABLE_CSV, config=config, scale_jobs=scale_jobs)
     
     return analyze_strategy(
         strategy_name=strategy,
@@ -161,7 +162,7 @@ def main():
         week_hours=H,
         timezone="UTC",
     )
-    dc = DataCenter(csv_path="/z/azure/vmtable.csv", config=config, scale_jobs=scale_jobs)
+    dc = DataCenter(csv_path=VMTABLE_CSV, config=config, scale_jobs=scale_jobs)
 
     # 3) BESS economics
     BESS_DURATION_HOURS = 4.0
