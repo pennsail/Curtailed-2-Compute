@@ -63,6 +63,8 @@ eval/*.csv
 
 # Internal-only docs
 TEAM_UPDATE.md
+JIALI_EMAIL_DRAFT.md
+RELEASING.md
 
 # Local validation run outputs
 validation/
