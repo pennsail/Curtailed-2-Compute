@@ -76,8 +76,7 @@ Curtailed-2-Compute/
 │   ├── 02_TAC.ipynb
 │   ├── 03_lmp_vectors.ipynb
 │   ├── 04_electricity_costs_analysis.ipynb
-│   ├── 05_scenario_financial_analysis.ipynb
-│   └── build_avg_daily_curtailment_by_season_and_year.py
+│   └── 05_scenario_financial_analysis.ipynb
 └── eval/                              # Battery and workload evaluation workflow
 ```
 

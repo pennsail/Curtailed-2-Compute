@@ -55,11 +55,10 @@ data/*.pdf
 /*.csv
 /*.png
 
-# Generated visuals and local eval artifacts
+# Generated outputs (reproduced by running notebooks/eval scripts)
 notebooks/*.png
+notebooks/*.csv
 eval/*.png
-eval/*.csv
-!eval/vmtable.csv          # synthetic bundled workload, must be tracked
 
 # Internal-only docs
 TEAM_UPDATE.md
