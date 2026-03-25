@@ -2,12 +2,13 @@
 
 ## Included Files
 
-Supporting inputs referenced by the notebook workflow:
+Supporting inputs referenced by the notebook workflow, extracted from the
+[CAISO Revised Draft 2024-2025 Transmission Plan](https://www.caiso.com/documents/revised-draft-2024-2025-transmission-plan.pdf):
 
-- `caiso_wind_solar_pcm.csv`
-- `congestion_costs.csv`
-- `local_generation_mix_fresno.csv`
-- `transmission_project_costs.csv`
+- `caiso_wind_solar_pcm.csv` — wind and solar curtailment by renewable zone (Table 4.6-2)
+- `congestion_costs.csv` — congestion costs and durations by constrained area (Appendix G)
+- `local_generation_mix_fresno.csv` — Fresno-area resource capacity mix by type
+- `transmission_project_costs.csv` — approved transmission project cost estimates
 
 Derived reproducibility assets in `data/processed/`:
 
