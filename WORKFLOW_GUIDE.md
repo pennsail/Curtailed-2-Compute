@@ -20,7 +20,6 @@ The notebook sequence runs in order:
 
 **Typical outputs**
 
-- summary CSV tables in `notebooks/`
 - plots and diagnostics for curtailment patterns
 
 ## Step 2: `notebooks/02_TAC.ipynb`

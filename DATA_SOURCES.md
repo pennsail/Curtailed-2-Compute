@@ -4,8 +4,6 @@ This document describes the datasets used by the `Curtailed-2-Compute` workflow.
 
 ## Included in the Repository
 
-The following derived and supporting datasets are included:
-
 The following four files are extracted from the [CAISO Revised Draft 2024-2025 Transmission Plan](https://www.caiso.com/documents/revised-draft-2024-2025-transmission-plan.pdf):
 
 | Path | Source table | Role |
