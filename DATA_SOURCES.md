@@ -87,6 +87,14 @@ The notebooks primarily use LMP component data to identify curtailment-aligned h
 
 The public workflow uses negative congestion values as a signal for curtailment-like conditions.
 
+## WattTime Marginal Carbon Intensity
+
+- **Source**: [WattTime API](https://watttime.org/)
+- **Used by**: `notebooks/03_lmp_vectors.ipynb`
+- **Role**: Provides hourly marginal carbon intensity (`marginal_co2_lbs_per_mwh`) for the CAISO NP-15 node, used to build the carbon column in the representative weekly vectors.
+- **Access**: Requires a free WattTime account. Set `WATTTIME_USER` and `WATTTIME_PASSWORD` environment variables before running notebook 03.
+- **Note**: If you are using the **lightweight path** (notebooks 04-05 or the `eval/` workflow), this data is already included in the pre-built vectors. WattTime credentials are only needed for full end-to-end reproduction.
+
 ## CAISO 2024-2025 Transmission Plan Data
 
 The four supporting CSV files listed above were extracted from the [CAISO Revised Draft 2024-2025 Transmission Plan](https://www.caiso.com/documents/revised-draft-2024-2025-transmission-plan.pdf). They provide transmission zone curtailment projections, congestion cost estimates, Fresno-area generation capacity, and approved project costs used in the TAC and economic analysis notebooks.

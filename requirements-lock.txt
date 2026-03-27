@@ -1,0 +1,35 @@
+# Pinned dependency versions for exact reproducibility.
+# Generated from a working environment on 2025-04-06.
+# Use: pip install -r requirements-lock.txt
+# For flexible installs, use requirements.txt instead.
+
+# Core Data Analysis
+pandas==2.2.3
+numpy==2.2.3
+
+# Financial Calculations
+numpy-financial==1.0.0
+
+# Visualization
+matplotlib==3.10.1
+seaborn==0.13.2
+
+# Jupyter Notebook Support
+jupyter==1.1.1
+ipykernel==6.29.5
+notebook==7.3.2
+
+# Excel File Support
+openpyxl==3.1.5
+
+# API Requests (WattTime carbon intensity in notebook 03)
+requests==2.32.3
+
+# Progress bars (eval scripts)
+tqdm==4.67.1
+
+# Time Zone Support
+python-dateutil==2.9.0.post0
+
+# Testing
+pytest==8.3.5

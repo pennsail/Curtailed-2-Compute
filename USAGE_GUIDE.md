@@ -29,6 +29,19 @@ Download the external CAISO files described in `DATA_SOURCES.md`:
 
 Keep those raw downloads local. They do not need to be committed to GitHub.
 
+### WattTime API (optional, notebook 03 only)
+
+Notebook 03 fetches marginal carbon intensity data from the [WattTime API](https://watttime.org/) to build the carbon column in the representative weekly vectors. To use this:
+
+1. Register for a free account at [WattTime](https://watttime.org/get-the-data/data-plans/).
+2. Set your credentials as environment variables before running the notebook:
+   ```bash
+   export WATTTIME_USER="your_username"
+   export WATTTIME_PASSWORD="your_password"
+   ```
+
+If you do not have WattTime credentials, you can still use the **lightweight path** — the pre-built vectors in `data/processed/` and the `eval/` directory already include carbon intensity data, so this step is only needed for full end-to-end reproduction from raw data.
+
 ## 3. Run the Canonical Notebook Sequence
 
 Run the notebooks in order:

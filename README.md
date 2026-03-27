@@ -90,12 +90,21 @@ The public workflow focuses on three scenario families:
 
 Curtailment conditions are identified from CAISO LMP congestion signals, and the financial model evaluates long-run economics through NPV, IRR, MIRR, and minimum viable rent calculations.
 
+## Tests
+
+The `eval/tests/` directory contains a test suite covering the Battery model and DataCenter scheduling strategies:
+
+```bash
+python -m pytest eval/tests/ -v
+```
+
 ## Reproducibility Notes
 
 - Run notebooks `01` to `05` in sequence.
 - Review data expectations in `DATA_SOURCES.md` before running from raw inputs.
 - Treat files in `data/processed/` as lightweight reproducibility aids, not substitutes for the full raw CAISO archive.
 - The `eval/` workflow can be run independently: `cd eval && python demo_strategies_combined_plot.py`.
+- For exact dependency pinning, use `pip install -r requirements-lock.txt` instead of `requirements.txt`.
 
 ## Documentation
 

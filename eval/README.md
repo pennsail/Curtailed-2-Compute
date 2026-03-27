@@ -57,10 +57,14 @@ This runs the primary evaluation and generates comparison plots for three strate
 | File | Description |
 | --- | --- |
 | `vmtable.csv` | Synthetic Azure VM workload (bundled for reproducibility) |
-| `vector_high_curtailment_week_v2.csv` | Representative 168-hour high-curtailment week |
-| `vector_high_volatility_week_v2.csv` | Representative 168-hour high-volatility week |
+| `vector_high_curtailment_week_v2.csv` | Representative 168-hour high-curtailment week (with carbon intensity) |
+| `vector_high_volatility_week_v2.csv` | Representative 168-hour high-volatility week (with carbon intensity) |
 
-These vector files are derived from the same analysis in `notebooks/03_lmp_vectors.ipynb` (stored as `data/processed/vector_*.csv` in the main repo).
+These vector files are extended versions of the `data/processed/vector_*.csv` files in the main repo. The key differences:
+
+- **Extra column**: The `_v2` files include a `marginal_co2_lbs_per_mwh` column (from the WattTime API) used by the scheduling strategies for carbon-aware optimization.
+- **Full 168 hours**: The `_v2` files cover the complete week starting at midnight, while the `data/processed/` versions start at 08:00 of the first day.
+- **Datetime format**: The `_v2` files use `M/D/YY H:MM` format; the `data/processed/` files use `YYYY-MM-DD HH:MM`.
 
 #### Dependencies
 

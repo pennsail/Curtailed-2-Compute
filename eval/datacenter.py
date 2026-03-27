@@ -68,10 +68,6 @@ class DataCenter:
         df = pd.read_csv(self.csv_path, header=None)
         if len(df.columns) != len(column_headers):
             raise ValueError(f"Expected {len(column_headers)} columns, found {len(df.columns)}")
-            # df = pd.read_csv(self.csv_path)
-            # if len(df.columns) != len(column_headers):
-            #     # last resort: set names if fewer cols; user can adjust upstream
-            #     df.columns = (df.columns.tolist() + column_headers[len(df.columns):])[:len(column_headers)]
         else:
             df.columns = column_headers
 
@@ -106,15 +102,6 @@ class DataCenter:
         self._week_start_epoch = week_start_epoch
         week_end_epoch = week_start_epoch + H * 3600.0
 
-        # Clean rows
-        # df = df.dropna(subset=[util_col, "timestamp vm created"])
-        # # fill deleted with +1h minimum
-        # df["timestamp vm deleted"] = df["timestamp vm deleted"].fillna(df["timestamp vm created"] + 3600.0)
-        # # bounds
-        # df = df[(df[util_col].between(0, 100))]
-        # # vcpu bucket may be NaN; assume 2 if missing
-        # df[vcpu_col] = df[vcpu_col].fillna(2).clip(lower=1)
-
         jobs: List[VMJob] = []
         watts_per_vcpu = float(self.config.watts_per_vcpu)
 
@@ -142,10 +129,6 @@ class DataCenter:
             it_power_mw = (watts_per_vcpu * vcpus * util_frac) / 1e6  # MW
             if it_power_mw <= 0.0:
                 continue
-
-            # # sanity check: skip jobs with duration > 12h
-            # if duration_h > 12:
-            #     continue
 
             jobs.append(VMJob(
                 release_h=s_idx,
@@ -224,10 +207,6 @@ class DataCenter:
             return self._jobs or []
 
         k = target / peak_raw
-        # multiplicative scaling on power keeps shapes & counts
-        # save the scaled factor to a file, name it by strategy
-        # with open(f"scale_factor_{self.config.strategy}.txt", "w") as f:
-        #     f.write(f"{k}\n")
 
         return [
             VMJob(
@@ -657,10 +636,8 @@ class DataCenter:
         total_cost_usd = float(np.dot(met_by_grid_mw, prices[:H]))
         total_carbon_kg = float(np.dot(met_by_grid_mw, grid_ci[:H]))
         
-        # Add carbon pricing if applicable
         if carbon_price_per_ton > 0.0:
-            # total_cost_usd += (total_carbon_kg / 1000.0) * carbon_price_per_ton
-            raise NotImplementedError("Carbon pricing not implemented")
+            raise NotImplementedError("Carbon pricing is not yet implemented.")
 
         # Create result DataFrame
         log = {
