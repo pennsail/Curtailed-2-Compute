@@ -4,6 +4,10 @@
 
 This repository contains the public-facing research workflow for analyzing California ISO (CAISO) curtailment patterns and evaluating parameterized economic scenarios for flexible data center loads. The release is centered on the canonical notebook sequence in `notebooks/01` through `notebooks/05`, supported by lightweight derived datasets and documentation that explain how to reproduce the analysis.
 
+This research was made possible by the generous support of Next10. We are grateful for their financial contributions, as
+well as their technical perspective and insights into the California context, which significantly shaped the direction and
+depth of this work. Please find our joint report [here](https://www.next10.org/publications/curtail-to-compute).
+
 ## Overview
 
 The repository provides:
