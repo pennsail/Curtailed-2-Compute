@@ -12,6 +12,8 @@ authors:
 repository-code: https://github.com/pennsail/Curtailed-2-Compute
 url: https://github.com/pennsail/Curtailed-2-Compute
 license: MIT
+version: "1.0.0"
+date-released: "2025-04-06"
 abstract: >
   Public research workflow for analyzing CAISO curtailment patterns and
   parameterized economic scenarios for flexible data center loads.

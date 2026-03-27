@@ -16,7 +16,7 @@ The repository provides:
 
 ### Prerequisites
 
-- Python 3.8 or newer
+- Python 3.9 or newer
 - Jupyter Notebook or JupyterLab
 - The packages listed in `requirements.txt`
 

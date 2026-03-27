@@ -58,12 +58,10 @@ data/*.pdf
 # Generated outputs (reproduced by running notebooks/eval scripts)
 notebooks/*.png
 notebooks/*.csv
+notebooks/*.xlsx
 eval/*.png
-
-# Internal-only docs
-TEAM_UPDATE.md
-JIALI_EMAIL_DRAFT.md
-RELEASING.md
+eval/*.pdf
+*.npy
 
 # Local validation run outputs
 validation/
