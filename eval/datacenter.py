@@ -26,7 +26,7 @@ class DataCenterConfig:
     capacity_mw: float = 20.0                # IT capacity (MW)
     pue: float = 1.2                         # Power Usage Effectiveness
     watts_per_vcpu: float = 20.0             # W@100% util per vCPU (IT power model coeff)
-    utilization_column: str = "avg_cpu"      # 'avg_cpu' or 'p95 max cpu'
+    utilization_column: str = "avg cpu"       # 'avg cpu' or 'p95 max cpu'
     week_hours: int = 7 * 24
     timezone: str = "America/Los_Angeles"    # epoch alignment
 

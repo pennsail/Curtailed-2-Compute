@@ -1,14 +1,11 @@
 import numpy as np
 import pandas as pd
-import pickle
 from datacenter import DataCenter, DataCenterConfig
 from battery import Battery
-from datetime import datetime
 from concurrent.futures import ProcessPoolExecutor
-import copy
 
 # ---- Strategy knobs for "only_curtail" (passed through to datacenter) ----
-RESERVE_FRAC_FOR_BATT = 0.40   # Reserve 20% of power for battery charging during curtailment hours
+RESERVE_FRAC_FOR_BATT = 0.40   # Reserve 40% of power for battery charging during curtailment hours
 CARRY_BACKLOG = True           # Carry unscheduled jobs from the previous day to the next day
 
 H = 168  # one week in hours
