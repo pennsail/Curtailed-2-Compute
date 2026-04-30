@@ -4,11 +4,11 @@ message: "If you use this repository, please cite it using the metadata below."
 type: software
 authors:
   - family-names: Yu
-    given-names: Lauren
+    given-names: Lindsey
   - family-names: Xing
     given-names: Jiali
-  - family-names: Yu
-    given-names: Lindsey
+  - family-names: Lee
+    given-names: Benjamin C.
 repository-code: https://github.com/pennsail/Curtailed-2-Compute
 url: https://github.com/pennsail/Curtailed-2-Compute
 license: MIT
